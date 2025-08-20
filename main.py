@@ -43,9 +43,23 @@ def send_emails():
         msg = MIMEMultipart()
         msg["From"] = EMAIL
         msg["To"] = to_email
-        msg["Subject"] = f"你好 {real_name}，Python + Render 自动邮件测试"
+        msg["Subject"] = f"Olá, {real_name} senhor/senhora———Da JiLi707。VIP，Notificação de crédito de R$200~"
 
-        body = f"你好 {name},\n\n这是一封来自 Render 免费 Web 服务触发的测试邮件。\n\n祝好！"
+        body = f"""👋 Olá, Sr(a) {name}
+
+        Detectamos que você ainda não resgatou sua recompensa VIP de R$ 50 referente ao mês de agosto.
+
+        👉 Por favor, faça login com o seu usuário: {name}
+        Em seguida, clique no ícone de promoções na parte inferior da página inicial para resgatar o seu bônus mensal VIP.
+
+        💰 Lembrete: o bônus de R$ 50 será creditado automaticamente todo dia 1º de cada mês.
+
+        ✨ Quanto mais alto for o seu nível VIP, maior será o valor das recompensas!
+
+        📈 Continue evoluindo sua conta para desbloquear recompensas ainda maiores!
+
+        — Equipe JILI707。vip
+        """
         msg.attach(MIMEText(body, "plain"))
 
         try:
