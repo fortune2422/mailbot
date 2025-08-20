@@ -43,16 +43,16 @@ def send_emails():
         msg = MIMEMultipart()
         msg["From"] = EMAIL
         msg["To"] = to_email
-        msg["Subject"] = f"Olá, {real_name} senhor/senhora———Da JiLi707。VIP，Notificação de crédito de R$200~"
+        msg["Subject"] = f"Olá, {real_name} senhor/senhora———Da JiLi707。VIP，Notificação de crédito de R200~"
 
         body = f"""👋 Olá, Sr(a) {name}
 
-        Detectamos que você ainda não resgatou sua recompensa VIP de R$ 50 referente ao mês de agosto.
+        Detectamos que você ainda não resgatou sua recompensa VIP de R50 referente ao mês de agosto.
 
         👉 Por favor, faça login com o seu usuário: {name}
         Em seguida, clique no ícone de promoções na parte inferior da página inicial para resgatar o seu bônus mensal VIP.
 
-        💰 Lembrete: o bônus de R$ 50 será creditado automaticamente todo dia 1º de cada mês.
+        💰 Lembrete: o bônus de R50 será creditado automaticamente todo dia 1º de cada mês.
 
         ✨ Quanto mais alto for o seu nível VIP, maior será o valor das recompensas!
 
