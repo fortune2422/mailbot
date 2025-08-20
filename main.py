@@ -43,7 +43,7 @@ def send_emails():
         msg = MIMEMultipart()
         msg["From"] = EMAIL
         msg["To"] = to_email
-        msg["Subject"] = f"Olá, {real_name} senhor/senhora———Da JiLi707。VIP，Notificação de crédito de R200~"
+        msg["Subject"] = f"Olá, {real_name} senhor/senhora———Da JiLi707。VIP~"
 
         body = f"""👋 Olá, Sr(a) {name}
 
