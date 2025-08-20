@@ -13,7 +13,7 @@ app = Flask(__name__)
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 
-# 每个账号每日上限（可以自己改）
+# 每个账号每日上限（自己可改）
 DAILY_LIMIT = 450
 
 # 自动加载所有账号
@@ -46,17 +46,17 @@ def reset_daily_usage():
         last_reset_date = today
 
 def get_next_account():
-    """获取下一个可用账号（轮流 + 上限保护）"""
+    """轮流切换账号 + 上限保护"""
     global current_index
-    for _ in range(len(ACCOUNTS)):  # 最多循环一圈
+    for _ in range(len(ACCOUNTS)):
         acc = ACCOUNTS[current_index]
-        current_index = (current_index + 1) % len(ACCOUNTS)
+        current_index = (current_index + 1) % len(ACCOUNTS)  # 每次调用都换账号
         if account_usage[acc["email"]] < DAILY_LIMIT:
             return acc
-    return None  # 如果所有账号都超限，就返回 None
+    return None  # 如果所有账号都到上限
 
 def send_emails():
-    reset_daily_usage()  # 每次触发时先检查是否需要清零
+    reset_daily_usage()  # 检查是否需要清零
 
     recipients = []
     try:
@@ -101,7 +101,7 @@ Detectamos que você ainda não resgatou sua recompensa do mês de agosto.
 
 📈 Continue evoluindo sua conta para desbloquear recompensas ainda maiores!
 
-— Equipe JILI707。vip
+— Equipe JILI707.vip
 """
         msg.attach(MIMEText(body, "plain"))
 
@@ -121,7 +121,7 @@ Detectamos que você ainda não resgatou sua recompensa do mês de agosto.
         except Exception as e:
             results.append(f"❌ {idx}. 发送失败: {to_email}, 错误: {e}")
 
-        # 随机延时 5~15 秒，更自然
+        # 每封间隔 5~15 秒，防止被 Gmail 封
         time.sleep(random.randint(5, 15))
 
     return results
