@@ -38,11 +38,12 @@ def send_emails():
         if not to_email:
             continue
         name = person.get("name", "朋友")
+        real_name = person.get("name2", name)
 
         msg = MIMEMultipart()
         msg["From"] = EMAIL
         msg["To"] = to_email
-        msg["Subject"] = "Python + Render 自动邮件测试"
+        msg["Subject"] = f"你好 {real_name}，Python + Render 自动邮件测试"
 
         body = f"你好 {name},\n\n这是一封来自 Render 免费 Web 服务触发的测试邮件。\n\n祝好！"
         msg.attach(MIMEText(body, "plain"))
