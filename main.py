@@ -43,22 +43,20 @@ def send_emails():
         msg = MIMEMultipart()
         msg["From"] = EMAIL
         msg["To"] = to_email
-        msg["Subject"] = f"Olá, {real_name} senhor/senhora———Da JiLi707。VIP~"
+        msg["Subject"] = f"Olá {real_name}, sua recompensa VIP da JILI707 está disponível"
 
-        body = f"""👋 Olá, Sr(a) {name}
+        body = f"""Olá {name},
 
-        Detectamos que você ainda não resgatou sua recompensa VIP de R50 referente ao mês de agosto.
+        Detectamos que você ainda não resgatou sua recompensa do mês de agosto.
 
-        👉 Por favor, faça login com o seu usuário: {name}
-        Em seguida, clique no ícone de promoções na parte inferior da página inicial para resgatar o seu bônus mensal VIP.
+        Por favor, acesse sua conta e clique no ícone de promoções na parte inferior da página inicial para resgatar sua recompensa.
 
-        👉 Lembrete: o bônus de R50 será creditado automaticamente todo dia 1º de cada mês.
+        Lembrete: a recompensa será creditada automaticamente todo dia 1º de cada mês.
 
-        ✨ Quanto mais alto for o seu nível VIP, maior será o valor das recompensas!
+        Quanto mais você evoluir sua conta, maiores serão os benefícios que poderá receber.
 
-        📈 Continue evoluindo sua conta para desbloquear recompensas ainda maiores!
-
-        — Equipe JILI707。vip
+        Atenciosamente,
+        Equipe JILI707。vip
         """
         msg.attach(MIMEText(body, "plain"))
 
