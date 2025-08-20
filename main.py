@@ -66,7 +66,7 @@ def send_emails():
         except Exception as e:
             results.append(f"❌ {idx}. 发送失败: {to_email}, 错误: {e}")
 
-        time.sleep(5)  # 避免一次性发太快被 Gmail 限制
+        time.sleep(10)  # 避免一次性发太快被 Gmail 限制
 
     server.quit()
     return results
