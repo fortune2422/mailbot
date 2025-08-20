@@ -52,7 +52,7 @@ def send_emails():
         👉 Por favor, faça login com o seu usuário: {name}
         Em seguida, clique no ícone de promoções na parte inferior da página inicial para resgatar o seu bônus mensal VIP.
 
-        💰 Lembrete: o bônus de R50 será creditado automaticamente todo dia 1º de cada mês.
+        👉 Lembrete: o bônus de R50 será creditado automaticamente todo dia 1º de cada mês.
 
         ✨ Quanto mais alto for o seu nível VIP, maior será o valor das recompensas!
 
