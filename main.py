@@ -8,8 +8,8 @@ from email.mime.multipart import MIMEMultipart
 # Gmail 配置 (环境变量中设置)
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
-EMAIL = os.getenv("EMAIL")          # 你的 Gmail 地址
-APP_PASSWORD = os.getenv("APP_PASSWORD")  # Gmail 应用专用密码
+EMAIL = os.getenv("jilicsone@gmail.com")          # 你的 Gmail 地址
+APP_PASSWORD = os.getenv("rwfc xnul qrtr uowx")  # Gmail 应用专用密码
 
 if not EMAIL or not APP_PASSWORD:
     raise ValueError("请在 Render 的环境变量里设置 EMAIL 和 APP_PASSWORD")
