@@ -2,7 +2,6 @@ import smtplib
 import csv
 import os
 import time
-import random
 import datetime
 from flask import Flask, request, jsonify, render_template_string
 
@@ -10,9 +9,8 @@ app = Flask(__name__)
 
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
-DAILY_LIMIT = 450  # 每个账号每日上限
+DAILY_LIMIT = 450
 
-# ========== 账号加载 ==========
 def load_accounts():
     accounts = []
     i = 1
@@ -31,7 +29,6 @@ current_index = 0
 account_usage = {acc["email"]: 0 for acc in ACCOUNTS}
 last_reset_date = datetime.date.today()
 
-# ========== 收件箱管理 ==========
 RECIPIENT_FILE = "recipients.csv"
 SENT_FILE = "sent.csv"
 
@@ -60,7 +57,6 @@ def save_sent_email(email):
         writer = csv.writer(f)
         writer.writerow([email])
 
-# ========== 辅助 ==========
 def reset_daily_usage():
     global account_usage, last_reset_date
     today = datetime.date.today()
@@ -77,13 +73,11 @@ def get_next_account():
             return acc
     return None
 
-# ========== 发送邮件 ==========
 def send_emails_task(subject, body, interval):
     reset_daily_usage()
     recipients = load_recipients()
     sent_emails = load_sent_emails()
     results = []
-
     new_recipients = []
 
     for person in recipients:
@@ -93,14 +87,12 @@ def send_emails_task(subject, body, interval):
 
         acc = get_next_account()
         if not acc:
-            results.append({"email": to_email, "status": "⚠️ 所有账号今天都达到上限"})
+            results.append({"email": to_email, "status": "⚠️ 所有账号今天上限"})
             break
 
         EMAIL = acc["email"]
         APP_PASSWORD = acc["app_password"]
         real_name = person.get("real_name") or person.get("name") or "Amigo"
-
-        # 替换模板变量
         mail_body = body.replace("{real_name}", real_name).replace("{name}", person.get("name","Amigo"))
         mail_subject = subject.replace("{real_name}", real_name).replace("{name}", person.get("name","Amigo"))
 
@@ -120,19 +112,14 @@ def send_emails_task(subject, body, interval):
 
         time.sleep(interval)
 
-    # 更新收件箱列表，移除已发送邮箱
     for person in recipients:
         if person.get("email") not in [r["email"] for r in results if r["status"].startswith("✅")]:
             new_recipients.append(person)
     save_recipients(new_recipients)
-
     return results
 
-# ========== Flask Routes ==========
-# ---- 主页面 ----
 @app.route("/", methods=["GET"])
 def home():
-    recipients = load_recipients()
     return render_template_string("""
 <!DOCTYPE html>
 <html>
@@ -140,19 +127,23 @@ def home():
 <meta charset="utf-8">
 <title>MailBot 后台</title>
 <style>
-body { font-family: Arial; display:flex; margin:0; }
+body { font-family: Arial; margin:0; display:flex; background:#f0f2f5; }
 nav { width:200px; background:#2c3e50; color:white; min-height:100vh; padding:20px; }
-nav button { display:block; width:100%; margin-bottom:10px; padding:10px; background:#34495e; border:none; color:white; cursor:pointer; }
+nav button { display:block; width:100%; margin-bottom:10px; padding:10px; background:#34495e; border:none; color:white; cursor:pointer; border-radius:5px; font-weight:bold;}
 nav button:hover { background:#1abc9c; }
 main { flex:1; padding:20px; }
-.card { border:1px solid #ccc; padding:10px; margin-bottom:10px; border-radius:5px; background:#f9f9f9; }
-input, textarea { width:100%; margin-bottom:10px; padding:5px; }
+.card { border-radius:8px; padding:12px; margin-bottom:10px; background:white; box-shadow:0 2px 4px rgba(0,0,0,0.1); display:flex; justify-content:space-between; align-items:center; }
+input, textarea, select { width:100%; margin-bottom:10px; padding:8px; border:1px solid #ccc; border-radius:4px; }
+button.action { padding:6px 10px; background:#3498db; color:white; border:none; border-radius:4px; cursor:pointer; }
+button.action:hover { background:#2980b9; }
+h2 { margin-top:0; }
+#recipientList, #log { max-height:400px; overflow-y:auto; }
 </style>
 </head>
 <body>
 <nav>
-<button onclick="showPage('send')">发送邮件</button>
-<button onclick="showPage('recipients')">收件箱管理</button>
+<button onclick="showPage('send')">📤 发送邮件</button>
+<button onclick="showPage('recipients')">📥 收件箱管理</button>
 </nav>
 <main>
 <div id="send" style="display:none;">
@@ -163,7 +154,7 @@ input, textarea { width:100%; margin-bottom:10px; padding:5px; }
 <textarea id="body" rows="6" placeholder="正文支持 {real_name} {name}"></textarea>
 <label>发送间隔秒数:</label>
 <input type="number" id="interval" value="5" min="1">
-<button onclick="sendEmails()">点击发送</button>
+<button class="action" onclick="sendEmails()">发送</button>
 <h3>发送进度:</h3>
 <div id="log"></div>
 </div>
@@ -172,8 +163,8 @@ input, textarea { width:100%; margin-bottom:10px; padding:5px; }
 <h2>收件箱管理</h2>
 <label>上传 CSV:</label>
 <input type="file" id="csvfile">
-<button onclick="uploadCSV()">上传</button>
-<button onclick="clearAll()">一键清空收件箱</button>
+<button class="action" onclick="uploadCSV()">上传</button>
+<button class="action" onclick="clearAll()">一键清空</button>
 <h3>收件箱列表:</h3>
 <div id="recipientList"></div>
 </div>
@@ -203,6 +194,7 @@ function sendEmails(){
   .then(data=>{
     data.forEach(r=>{
       const div=document.createElement('div');
+      div.className="card";
       div.textContent=`${r.email}: ${r.status}`;
       document.getElementById('log').appendChild(div);
     });
@@ -231,7 +223,7 @@ function loadRecipients(){
       const div=document.createElement('div');
       div.className="card";
       div.innerHTML=`${i+1}. ${r.email} | ${r.name||""} | ${r.real_name||""} 
-      <button onclick="deleteRecipient('${r.email}')">删除</button>`;
+      <button class="action" onclick="deleteRecipient('${r.email}')">删除</button>`;
       list.appendChild(div);
     });
   });
@@ -260,7 +252,6 @@ function clearAll(){
 </html>
 """)
 
-# ---- 上传 CSV ----
 @app.route("/upload_csv", methods=["POST"])
 def upload_csv():
     file = request.files.get("file")
