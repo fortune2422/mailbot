@@ -175,7 +175,6 @@ def compose_email():
 
 @app.route("/send-stream")
 def send_stream():
-    # 支持动态调整间隔时间
     min_delay = int(request.args.get("min_delay", MIN_DELAY))
     max_delay = int(request.args.get("max_delay", MAX_DELAY))
     return Response(stream_with_context(send_emails_generator(min_delay, max_delay)))
@@ -190,7 +189,6 @@ def download_sent():
 # ========== 后台页面 ==========
 @app.route("/admin")
 def admin_home():
-    # 读取模板
     if os.path.exists(TEMPLATE_FILE):
         with open(TEMPLATE_FILE, "r", encoding="utf-8") as f:
             template = f.read().split("\n---\n")
@@ -212,7 +210,6 @@ def admin_home():
 <div class="container py-5">
 <h1 class="mb-4">📧 邮件后台管理</h1>
 
-<!-- 上传 CSV -->
 <div class="card mb-3">
   <div class="card-header">上传 emails.csv</div>
   <div class="card-body">
@@ -224,7 +221,6 @@ def admin_home():
   </div>
 </div>
 
-<!-- 编辑模板 -->
 <div class="card mb-3">
   <div class="card-header">编辑邮件模板</div>
   <div class="card-body">
@@ -243,7 +239,6 @@ def admin_home():
   </div>
 </div>
 
-<!-- 实时发送 -->
 <div class="card mb-3">
   <div class="card-header">发送邮件进度</div>
   <div class="card-body">
@@ -256,7 +251,6 @@ def admin_home():
   </div>
 </div>
 
-<!-- 其他操作 -->
 <div class="card mb-3">
   <div class="card-header">其他操作</div>
   <div class="card-body d-flex gap-2">
@@ -271,29 +265,31 @@ def admin_home():
 </div>
 
 <script>
-document.getElementById("sendBtn").addEventListener("click", function() {
+document.getElementById("sendBtn").addEventListener("click", function() {{
     const log = document.getElementById("sendLog");
     log.innerHTML = "";
     const minDelay = document.getElementById("minDelay").value || {MIN_DELAY};
     const maxDelay = document.getElementById("maxDelay").value || {MAX_DELAY};
-    fetch(`/send-stream?min_delay=${minDelay}&max_delay=${maxDelay}`).then(response => {
+    fetch(`/send-stream?min_delay=${{minDelay}}&max_delay=${{maxDelay}}`).then(response => {{
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
-        function read() {
-            reader.read().then(({done, value}) => {
+        function read() {{
+            reader.read().then(({{
+                done, value
+            }}) => {{
                 if (done) return;
                 log.innerHTML += decoder.decode(value);
                 log.scrollTop = log.scrollHeight;
                 read();
-            });
-        }
+            }});
+        }}
         read();
-    });
-});
+    }});
+}});
 </script>
 </body>
 </html>
-    '''
+'''
 
 # ========== 启动 ==========
 if __name__ == "__main__":
