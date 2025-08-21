@@ -12,18 +12,17 @@ app = Flask(__name__)
 
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
-DAILY_LIMIT = 450  # 每个账号每日上限
-SENT_FILE = "sent.csv"  # 已发送邮箱记录
+DAILY_LIMIT = 450
+SENT_FILE = "sent.csv"
 UPLOAD_FOLDER = 'uploads'
 TEMPLATE_FILE = 'email_template.txt'
 LOG_FILE = 'send_log.txt'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# 默认间隔时间（秒）
 MIN_DELAY = 5
 MAX_DELAY = 15
 
-# ========== 加载账号 ==========
+# ---------- 账号加载 ----------
 def load_accounts():
     accounts = []
     i = 1
@@ -42,7 +41,7 @@ current_index = 0
 account_usage = {acc["email"]: 0 for acc in ACCOUNTS}
 last_reset_date = datetime.date.today()
 
-# ========== 已发送邮箱 ==========
+# ---------- 已发送邮箱 ----------
 def load_sent_emails():
     if not os.path.exists(SENT_FILE):
         return set()
@@ -53,12 +52,15 @@ def save_sent_email(email):
     with open(SENT_FILE, "a", newline='', encoding="utf-8") as f:
         csv.writer(f).writerow([email])
 
-# ========== 日志 ==========
 def log_message(msg):
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(msg + "\n")
 
-# ========== 辅助函数 ==========
+def clear_log():
+    if os.path.exists(LOG_FILE):
+        os.remove(LOG_FILE)
+
+# ---------- 辅助 ----------
 def reset_daily_usage():
     global account_usage, last_reset_date
     today = datetime.date.today()
@@ -75,12 +77,11 @@ def get_next_account():
             return acc
     return None
 
-# ========== 发送生成器 ==========
+# ---------- 邮件发送生成器 ----------
 def send_emails_generator(min_delay=MIN_DELAY, max_delay=MAX_DELAY):
     reset_daily_usage()
     sent_emails = load_sent_emails()
 
-    # 加载 recipients
     recipients_file = os.path.join(UPLOAD_FOLDER, "emails.csv")
     if not os.path.exists(recipients_file):
         yield "❌ emails.csv 文件未找到<br>"
@@ -145,7 +146,9 @@ def send_emails_generator(min_delay=MIN_DELAY, max_delay=MAX_DELAY):
 
         time.sleep(random.randint(min_delay, max_delay))
 
-# ========== Flask 路由 ==========
+    yield "<script>alert('✅ 邮件发送完成');</script>"
+
+# ---------- Flask 路由 ----------
 @app.route("/", methods=["GET"])
 def home():
     return "服务正常运行 🚀"
@@ -173,6 +176,13 @@ def compose_email():
         f.write(subject + "\n---\n" + body)
     return "✅ 邮件模板保存成功"
 
+@app.route("/reset-sent", methods=["POST"])
+def reset_sent():
+    if os.path.exists(SENT_FILE):
+        os.remove(SENT_FILE)
+    clear_log()
+    return "✅ 已发送记录已重置"
+
 @app.route("/send-stream")
 def send_stream():
     min_delay = int(request.args.get("min_delay", MIN_DELAY))
@@ -186,7 +196,19 @@ def download_sent():
     else:
         return "❌ sent.csv 不存在", 404
 
-# ========== 后台页面 ==========
+@app.route("/log")
+def get_log():
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, "r", encoding="utf-8") as f:
+            return "<br>".join(f.read().splitlines())
+    return "日志为空"
+
+@app.route("/clear-log", methods=["POST"])
+def clear_log_route():
+    clear_log()
+    return "✅ 日志已清空"
+
+# ---------- 后台页面 ----------
 @app.route("/admin")
 def admin_home():
     if os.path.exists(TEMPLATE_FILE):
@@ -213,18 +235,17 @@ def admin_home():
 <div class="card mb-3">
   <div class="card-header">上传 emails.csv</div>
   <div class="card-body">
-    <form action="/upload" method="post" enctype="multipart/form-data" class="d-flex gap-2">
+    <form id="uploadForm" enctype="multipart/form-data" class="d-flex gap-2">
       <input type="file" name="file" class="form-control" required>
       <button type="submit" class="btn btn-primary">上传</button>
     </form>
-    <small class="text-muted">上传后会覆盖现有 emails.csv</small>
   </div>
 </div>
 
 <div class="card mb-3">
   <div class="card-header">编辑邮件模板</div>
   <div class="card-body">
-    <form action="/compose" method="post">
+    <form id="composeForm">
       <div class="mb-2">
         <label class="form-label">主题</label>
         <input type="text" name="subject" class="form-control" value="{subject}" required>
@@ -252,10 +273,22 @@ def admin_home():
 </div>
 
 <div class="card mb-3">
+  <div class="card-header">发送日志</div>
+  <div class="card-body">
+    <div class="d-flex gap-2 mb-2">
+      <button id="refreshLog" class="btn btn-info">刷新日志</button>
+      <button id="clearLog" class="btn btn-danger">清空日志</button>
+    </div>
+    <div id="logPanel" style="height: 200px; overflow-y: scroll; background: #f8f9fa; padding: 10px; border: 1px solid #dee2e6;"></div>
+  </div>
+</div>
+
+<div class="card mb-3">
   <div class="card-header">其他操作</div>
   <div class="card-body d-flex gap-2">
     <a href="/download-sent" class="btn btn-info">下载已发送邮箱</a>
-    <a href="/stats" class="btn btn-secondary">查看账号使用情况</a>
+    <a href="/stats" class="btn btn-secondary" target="_blank">查看账号使用情况</a>
+    <button id="resetBtn" class="btn btn-danger">重置已发送记录</button>
   </div>
 </div>
 
@@ -265,33 +298,76 @@ def admin_home():
 </div>
 
 <script>
-document.getElementById("sendBtn").addEventListener("click", function() {{
+// 上传 CSV
+document.getElementById("uploadForm").addEventListener("submit", function(e){
+    e.preventDefault();
+    const formData = new FormData(this);
+    fetch("/upload", {method:"POST", body: formData})
+        .then(res => res.text())
+        .then(msg => alert(msg));
+});
+
+// 保存模板
+document.getElementById("composeForm").addEventListener("submit", function(e){
+    e.preventDefault();
+    const data = new FormData(this);
+    fetch("/compose", {method:"POST", body:data})
+        .then(res => res.text())
+        .then(msg => alert(msg));
+});
+
+// 重置已发送
+document.getElementById("resetBtn").addEventListener("click", function(){
+    if(confirm("确定要重置已发送记录吗？此操作不可撤销！")){
+        fetch("/reset-sent", {method:"POST"})
+            .then(res => res.text())
+            .then(msg => alert(msg));
+    }
+});
+
+// 开始发送
+document.getElementById("sendBtn").addEventListener("click", function(){
     const log = document.getElementById("sendLog");
     log.innerHTML = "";
     const minDelay = document.getElementById("minDelay").value || {MIN_DELAY};
     const maxDelay = document.getElementById("maxDelay").value || {MAX_DELAY};
-    fetch(`/send-stream?min_delay=${{minDelay}}&max_delay=${{maxDelay}}`).then(response => {{
+    fetch(`/send-stream?min_delay=${minDelay}&max_delay=${maxDelay}`).then(response => {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
-        function read() {{
-            reader.read().then(({{
-                done, value
-            }}) => {{
-                if (done) return;
+        function read(){
+            reader.read().then(({done, value})=>{
+                if(done) return;
                 log.innerHTML += decoder.decode(value);
                 log.scrollTop = log.scrollHeight;
                 read();
-            }});
-        }}
+            });
+        }
         read();
-    }});
-}});
+    });
+});
+
+// 日志操作
+function refreshLog(){
+    fetch("/log").then(res => res.text()).then(html => {
+        document.getElementById("logPanel").innerHTML = html;
+    });
+}
+document.getElementById("refreshLog").addEventListener("click", refreshLog);
+document.getElementById("clearLog").addEventListener("click", function(){
+    if(confirm("确定要清空日志吗？")){
+        fetch("/clear-log", {method:"POST"})
+            .then(res => res.text())
+            .then(msg => { alert(msg); refreshLog(); });
+    }
+});
+
+// 初始化日志
+refreshLog();
 </script>
 </body>
 </html>
 '''
 
-# ========== 启动 ==========
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
