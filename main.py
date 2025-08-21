@@ -1,20 +1,18 @@
-import smtplib
-import csv
 import os
+import csv
+import smtplib
 import time
+import random
 import datetime
-from threading import Thread
 from flask import Flask, request, jsonify, render_template_string
 
 app = Flask(__name__)
 
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
-DAILY_LIMIT = 450
-SENT_FILE = "sent.csv"
-RECIPIENT_FILE = "emails.csv"
+DAILY_LIMIT = 450  # 每个账号每日上限
 
-# ========== 账号 ==========
+# ========== 加载账号 ==========
 def load_accounts():
     accounts = []
     i = 1
@@ -33,34 +31,10 @@ current_index = 0
 account_usage = {acc["email"]: 0 for acc in ACCOUNTS}
 last_reset_date = datetime.date.today()
 
-# ========== 收件箱 ==========
-def load_recipients():
-    if not os.path.exists(RECIPIENT_FILE):
-        return []
-    with open(RECIPIENT_FILE, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        return list(reader)
+# 收件箱列表（内存存储）
+RECIPIENTS = []
 
-def save_recipients(recipients):
-    with open(RECIPIENT_FILE, "w", newline="", encoding="utf-8") as f:
-        fieldnames = ["email", "name", "real_name"]
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(recipients)
-
-def load_sent_emails():
-    if not os.path.exists(SENT_FILE):
-        return set()
-    with open(SENT_FILE, newline="", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        return {row[0] for row in reader}
-
-def save_sent_email(email):
-    with open(SENT_FILE, "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow([email])
-
-# ========== 辅助 ==========
+# ========== 辅助函数 ==========
 def reset_daily_usage():
     global account_usage, last_reset_date
     today = datetime.date.today()
@@ -77,307 +51,225 @@ def get_next_account():
             return acc
     return None
 
-# ========== 实时发送 ==========
-sending_log = []
-sending_flag = False
-
-def send_emails_task(subject, body, interval):
-    global sending_log, sending_flag
-    sending_flag = True
-    sending_log = []
-    reset_daily_usage()
-    recipients = load_recipients()
-    sent_emails = load_sent_emails()
-    new_recipients = []
-
-    for person in recipients:
-        to_email = person.get("email")
-        if not to_email or to_email in sent_emails:
-            continue
-
-        acc = get_next_account()
-        if not acc:
-            sending_log.append({"email": to_email, "status": "⚠️ 所有账号今天上限"})
-            break
-
-        EMAIL = acc["email"]
-        APP_PASSWORD = acc["app_password"]
-        real_name = person.get("real_name") or person.get("name") or "Amigo"
-        mail_body = body.replace("{real_name}", real_name).replace("{name}", person.get("name","Amigo"))
-        mail_subject = subject.replace("{real_name}", real_name).replace("{name}", person.get("name","Amigo"))
-
-        try:
-            msg = f"Subject: {mail_subject}\n\n{mail_body}"
-            server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-            server.starttls()
-            server.login(EMAIL, APP_PASSWORD)
-            server.sendmail(EMAIL, to_email, msg)
-            server.quit()
-
-            account_usage[EMAIL] += 1
-            save_sent_email(to_email)
-            sending_log.append({"email": to_email, "status": "✅ 已发送"})
-        except Exception as e:
-            sending_log.append({"email": to_email, "status": f"❌ 发送失败: {e}"})
-
-        time.sleep(interval)
-
-    # 更新收件箱列表
-    for person in recipients:
-        if person.get("email") not in [r["email"] for r in sending_log if r["status"].startswith("✅")]:
-            new_recipients.append(person)
-    save_recipients(new_recipients)
-    sending_flag = False
-
 # ========== Flask 路由 ==========
-@app.route("/")
-def index():
-    return render_template_string(TEMPLATE)
+@app.route("/", methods=["GET"])
+def home():
+    template = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>MailBot 后台</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin:0; padding:0; display:flex; height:100vh; background:#f5f5f5;}
+            .sidebar { width:200px; background:#2f4050; color:#fff; display:flex; flex-direction:column; }
+            .sidebar button { padding:15px; background:none; border:none; color:#fff; cursor:pointer; text-align:left; font-size:16px; border-bottom:1px solid #3c4b5a;}
+            .sidebar button:hover { background:#1ab394;}
+            .main { flex:1; padding:20px; overflow:auto;}
+            .card { background:#fff; padding:15px; margin-bottom:15px; box-shadow:0 2px 5px rgba(0,0,0,0.1);}
+            table { width:100%; border-collapse: collapse;}
+            th, td { border:1px solid #ddd; padding:8px; text-align:left;}
+            th { background:#f2f2f2;}
+            .btn { padding:6px 12px; background:#1ab394; color:#fff; border:none; cursor:pointer;}
+            .btn:hover { background:#18a689;}
+        </style>
+    </head>
+    <body>
+        <div class="sidebar">
+            <button onclick="showPage('recipients')">收件箱管理</button>
+            <button onclick="showPage('send')">邮件发送</button>
+        </div>
+        <div class="main">
+            <div id="recipientsPage">
+                <h2>收件箱管理</h2>
+                <input type="file" id="csvFile">
+                <button class="btn" onclick="uploadCSV()">上传 CSV</button>
+                <button class="btn" onclick="clearRecipients()">一键清空列表</button>
+                <div class="card" style="margin-top:10px;">
+                    <h3>收件箱列表</h3>
+                    <table id="recipientsTable">
+                        <thead><tr><th>Email</th><th>Name</th><th>Real Name</th><th>操作</th></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+            <div id="sendPage" style="display:none;">
+                <h2>邮件发送</h2>
+                <div class="card">
+                    <label>主题:</label><br>
+                    <input type="text" id="subject" style="width:100%" placeholder="请输入主题, 可用 {name} {real_name}">
+                    <br><br>
+                    <label>正文:</label><br>
+                    <textarea id="body" style="width:100%;height:150px;" placeholder="请输入正文, 可用 {name} {real_name}"></textarea>
+                    <br><br>
+                    <label>发送间隔(秒):</label>
+                    <input type="number" id="interval" value="5" style="width:60px;">
+                    <button class="btn" onclick="startSend()">开始发送</button>
+                </div>
+                <div class="card" style="margin-top:10px;">
+                    <h3>实时发送进度</h3>
+                    <ul id="sendLog"></ul>
+                    <h3>账号发送统计</h3>
+                    <ul id="accountUsage"></ul>
+                </div>
+            </div>
+        </div>
+        <script>
+            function showPage(page){
+                document.getElementById('recipientsPage').style.display = page==='recipients'?'block':'none';
+                document.getElementById('sendPage').style.display = page==='send'?'block':'none';
+                if(page==='recipients'){ loadRecipients(); }
+            }
 
-@app.route("/upload_recipients", methods=["POST"])
-def upload_recipients():
-    file = request.files.get("file")
-    if file:
-        content = file.read().decode("utf-8").splitlines()
-        reader = csv.DictReader(content)
-        recipients = list(reader)
-        save_recipients(recipients)
-        return jsonify({"success": True})
-    return jsonify({"success": False, "msg":"未上传文件"})
+            function uploadCSV(){
+                const file = document.getElementById('csvFile').files[0];
+                if(!file){ alert("请选择文件"); return; }
+                const formData = new FormData();
+                formData.append('file', file);
+                fetch('/upload-csv', {method:'POST', body:formData})
+                .then(res=>res.json())
+                .then(data=>{
+                    alert(data.message);
+                    loadRecipients();
+                });
+            }
 
-@app.route("/delete_recipient", methods=["POST"])
-def delete_recipient():
-    email = request.json.get("email")
-    recipients = load_recipients()
-    recipients = [r for r in recipients if r["email"] != email]
-    save_recipients(recipients)
-    return jsonify({"success": True})
+            function loadRecipients(){
+                fetch('/recipients').then(res=>res.json()).then(data=>{
+                    const tbody = document.querySelector('#recipientsTable tbody');
+                    tbody.innerHTML = '';
+                    data.forEach((r,i)=>{
+                        const tr = document.createElement('tr');
+                        tr.innerHTML = `<td>${r.email}</td><td>${r.name||''}</td><td>${r.real_name||''}</td>
+                        <td><button onclick="deleteRecipient('${r.email}')">删除</button></td>`;
+                        tbody.appendChild(tr);
+                    });
+                });
+            }
 
-@app.route("/clear_recipients", methods=["POST"])
-def clear_recipients():
-    save_recipients([])
-    return jsonify({"success": True})
+            function deleteRecipient(email){
+                fetch('/delete-recipient', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email})})
+                .then(res=>res.json()).then(data=>{ alert(data.message); loadRecipients(); });
+            }
 
-@app.route("/send_emails", methods=["POST"])
-def send_emails():
-    data = request.json
-    subject = data.get("subject","")
-    body = data.get("body","")
-    interval = int(data.get("interval",5))
-    thread = Thread(target=send_emails_task, args=(subject, body, interval))
-    thread.start()
-    return jsonify({"success": True})
+            function clearRecipients(){
+                fetch('/clear-recipients', {method:'POST'}).then(res=>res.json()).then(data=>{ alert(data.message); loadRecipients(); });
+            }
 
-@app.route("/get_log")
-def get_log():
-    return jsonify(sending_log)
+            function startSend(){
+                const subject = document.getElementById('subject').value;
+                const body = document.getElementById('body').value;
+                const interval = parseInt(document.getElementById('interval').value);
+                if(!subject || !body){ alert("请填写主题和正文"); return; }
+                fetch('/send', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({subject,body,interval})})
+                .then(res=>res.json()).then(data=>{ alert(data.message); });
+                const evtSource = new EventSource('/send-stream');
+                const log = document.getElementById('sendLog');
+                const usage = document.getElementById('accountUsage');
+                log.innerHTML=''; usage.innerHTML='';
+                evtSource.onmessage = function(e){
+                    const d = JSON.parse(e.data);
+                    if(d.log) log.innerHTML += `<li>${d.log}</li>`;
+                    if(d.usage){
+                        usage.innerHTML='';
+                        for(const acc in d.usage){
+                            usage.innerHTML += `<li>${acc}: ${d.usage[acc]}</li>`;
+                        }
+                    }
+                }
+            }
+        </script>
+    </body>
+    </html>
+    """
+    return render_template_string(template)
 
-@app.route("/get_recipients")
+# ========== 收件箱管理接口 ==========
+@app.route("/upload-csv", methods=["POST"])
+def upload_csv():
+    global RECIPIENTS
+    file = request.files.get('file')
+    if not file: return jsonify({"message":"未上传文件"})
+    try:
+        stream = file.stream.read().decode('utf-8').splitlines()
+        reader = csv.DictReader(stream)
+        RECIPIENTS = []
+        for row in reader:
+            RECIPIENTS.append({
+                "email": row.get("email"),
+                "name": row.get("name"),
+                "real_name": row.get("real_name")
+            })
+        return jsonify({"message":f"成功上传 {len(RECIPIENTS)} 条"})
+    except Exception as e:
+        return jsonify({"message":f"上传失败: {e}"})
+
+@app.route("/recipients", methods=["GET"])
 def get_recipients():
-    return jsonify(load_recipients())
+    return jsonify(RECIPIENTS)
 
-@app.route("/get_account_usage")
-def get_account_usage():
-    reset_daily_usage()
-    return jsonify(account_usage)
+@app.route("/delete-recipient", methods=["POST"])
+def delete_recipient():
+    global RECIPIENTS
+    email = request.json.get('email')
+    RECIPIENTS = [r for r in RECIPIENTS if r['email'] != email]
+    return jsonify({"message":"已删除"})
 
-# ========== 前端模板 ==========
-TEMPLATE = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>MailBot 后台</title>
-<style>
-body { font-family: Arial, sans-serif; margin:0; background:#f5f5f5; display:flex; }
-.nav { width:200px; background:#1f2937; color:white; height:100vh; position:fixed; display:flex; flex-direction:column; }
-.nav button { width:100%; padding:15px; border:none; background:#1f2937; color:white; cursor:pointer; text-align:left; }
-.nav button.active { background:#4b5563; }
-.main { margin-left:200px; padding:20px; flex:1; }
-.card { background:white; padding:10px; margin:5px 0; border-radius:5px; box-shadow:0 1px 3px rgba(0,0,0,0.1); }
-input, textarea, select { width:100%; padding:8px; margin:5px 0; }
-button { padding:8px 12px; margin:5px 0; cursor:pointer; }
-#log { max-height:300px; overflow:auto; background:white; padding:10px; border-radius:5px; }
-.fixed_panel { position:fixed; top:0; right:0; width:250px; background:#f3f4f6; padding:10px; height:100vh; overflow:auto; box-shadow:-2px 0 5px rgba(0,0,0,0.1); }
-.search { margin-bottom:10px; padding:5px; width:100%; }
-.pagination { margin-top:10px; text-align:center; }
-.page-btn { margin:0 3px; padding:3px 7px; cursor:pointer; border:1px solid #ccc; border-radius:3px; }
-.page-btn.active { background:#4b5563; color:white; border:none; }
-</style>
-</head>
-<body>
-<div class="nav">
-  <button id="btn_recipients" class="active" onclick="showPage('recipients')">收件箱管理</button>
-  <button id="btn_send" onclick="showPage('send')">发送任务</button>
-</div>
-<div class="main">
-  <div id="recipients_page">
-    <h2>收件箱管理</h2>
-    <input type="file" id="recipients_file">
-    <button onclick="uploadRecipients()">上传 CSV</button>
-    <button onclick="clearRecipients()">一键清空列表</button>
-    <input class="search" id="recipient_search" placeholder="搜索收件箱">
-    <div id="recipients_list"></div>
-    <div class="pagination" id="recipient_pagination"></div>
-  </div>
-  <div id="send_page" style="display:none;">
-    <h2>发送任务</h2>
-    <input type="text" id="subject" placeholder="邮件主题 (可用 {name}, {real_name})">
-    <textarea id="body" placeholder="邮件正文 (可用 {name}, {real_name})" rows="6"></textarea>
-    <input type="number" id="interval" placeholder="发送间隔秒数" value="5">
-    <button onclick="sendEmails()">开始发送</button>
-    <input class="search" id="log_search" placeholder="搜索发送日志">
-    <div id="log"></div>
-    <div class="pagination" id="log_pagination"></div>
-  </div>
-</div>
-<div class="fixed_panel">
-  <h3>账号状态</h3>
-  <div id="account_usage"></div>
-</div>
-<script>
-function showPage(page){
-  document.getElementById('recipients_page').style.display = page=='recipients'?'block':'none';
-  document.getElementById('send_page').style.display = page=='send'?'block':'none';
-  document.getElementById('btn_recipients').classList.toggle('active', page=='recipients');
-  document.getElementById('btn_send').classList.toggle('active', page=='send');
-  loadRecipients();
-  loadAccountUsage();
-}
+@app.route("/clear-recipients", methods=["POST"])
+def clear_recipients():
+    global RECIPIENTS
+    RECIPIENTS = []
+    return jsonify({"message":"列表已清空"})
 
-// ========== 收件箱 ==========
-let recipients_data = [];
-let recipients_page = 1;
-const recipients_per_page = 10;
+# ========== 邮件发送接口 ==========
+SEND_QUEUE = []
+@app.route("/send", methods=["POST"])
+def start_send():
+    global SEND_QUEUE
+    data = request.json
+    subject = data.get("subject")
+    body = data.get("body")
+    interval = data.get("interval", 5)
+    if not subject or not body:
+        return jsonify({"message":"主题或正文为空"})
+    SEND_QUEUE = [{"subject":subject,"body":body,"interval":interval}]
+    return jsonify({"message":"开始发送，请查看下方实时进度"})
 
-function uploadRecipients(){
-  const file=document.getElementById('recipients_file').files[0];
-  if(!file){ alert('请选择文件'); return; }
-  const formData=new FormData();
-  formData.append('file', file);
-  fetch('/upload_recipients',{method:'POST',body:formData})
-  .then(r=>r.json()).then(d=>{ if(d.success){ alert('✅ 上传成功'); loadRecipients(); }});
-}
+@app.route("/send-stream")
+def send_stream():
+    def generate():
+        global SEND_QUEUE, RECIPIENTS
+        reset_daily_usage()
+        while SEND_QUEUE:
+            task = SEND_QUEUE.pop(0)
+            subject_template = task['subject']
+            body_template = task['body']
+            interval = task['interval']
+            new_recipients = RECIPIENTS.copy()
+            for idx, person in enumerate(new_recipients, start=1):
+                email = person['email']
+                name = person.get('name') or ''
+                real_name = person.get('real_name') or name
+                acc = get_next_account()
+                if not acc:
+                    yield f"data:{jsonify({'log':'⚠️ 所有账号今日已达到上限','usage':account_usage}).get_data(as_text=True)}\n\n"
+                    return
+                msg = f"Olá {real_name}, 这是测试邮件"
+                try:
+                    server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+                    server.starttls()
+                    server.login(acc["email"], acc["app_password"])
+                    server.sendmail(acc["email"], email, msg)
+                    server.quit()
+                    account_usage[acc["email"]] += 1
+                    RECIPIENTS = [r for r in RECIPIENTS if r['email'] != email]
+                    log = f"✅ {idx}. 已发送 {email} （账号 {acc['email']}，今日已发 {account_usage[acc['email']]}）"
+                except Exception as e:
+                    log = f"❌ {idx}. 发送失败 {email}, 错误: {e}"
+                yield f"data:{jsonify({'log':log,'usage':account_usage}).get_data(as_text=True)}\n\n"
+                time.sleep(interval)
+    return app.response_class(generate(), mimetype='text/event-stream')
 
-function clearRecipients(){
-  if(!confirm('确认清空收件箱列表吗？')) return;
-  fetch('/clear_recipients',{method:'POST'}).then(r=>r.json()).then(d=>{ if(d.success){ alert('✅ 已清空'); loadRecipients(); }});
-}
-
-function loadRecipients(){
-  fetch('/get_recipients').then(r=>r.json()).then(data=>{
-    recipients_data = data;
-    recipients_page = 1;
-    renderRecipients();
-  });
-}
-
-function renderRecipients(){
-  const search = document.getElementById('recipient_search').value.toLowerCase();
-  const filtered = recipients_data.filter(r=>r.email.toLowerCase().includes(search)|| (r.name||'').toLowerCase().includes(search));
-  const total_pages = Math.ceil(filtered.length/recipients_per_page);
-  if(recipients_page>total_pages) recipients_page=total_pages||1;
-  const start = (recipients_page-1)*recipients_per_page;
-  const page_data = filtered.slice(start,start+recipients_per_page);
-
-  const div = document.getElementById('recipients_list'); div.innerHTML='';
-  page_data.forEach(r=>{
-    const card=document.createElement('div'); card.className='card';
-    card.innerHTML=`<b>${r.email}</b> | ${r.name} | ${r.real_name||r.name} <button onclick="deleteRecipient('${r.email}')">删除</button>`;
-    div.appendChild(card);
-  });
-
-  // 分页按钮
-  const pagDiv = document.getElementById('recipient_pagination'); pagDiv.innerHTML='';
-  for(let i=1;i<=total_pages;i++){
-    const btn = document.createElement('span'); btn.className='page-btn'+(i===recipients_page?' active':''); btn.textContent=i;
-    btn.onclick = ()=>{ recipients_page=i; renderRecipients(); };
-    pagDiv.appendChild(btn);
-  }
-}
-document.getElementById('recipient_search').addEventListener('input', renderRecipients);
-
-function deleteRecipient(email){
-  fetch('/delete_recipient',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email})})
-  .then(r=>r.json()).then(d=>{ if(d.success) loadRecipients(); });
-}
-
-// ========== 发送任务 ==========
-let sending_data = [];
-let sending_page = 1;
-const sending_per_page = 10;
-let pollingInterval;
-
-function sendEmails(){
-  const subject=document.getElementById('subject').value;
-  const body=document.getElementById('body').value;
-  const interval=parseInt(document.getElementById('interval').value)||5;
-  if(!subject||!body){ alert('请填写主题和正文'); return; }
-  if(!confirm('确认发送邮件吗？')) return;
-  document.getElementById('log').innerHTML='';
-  clearInterval(pollingInterval);
-  pollingInterval=setInterval(loadLog,1000);
-  fetch('/send_emails',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({subject,body,interval})
-  }).then(r=>r.json()).then(d=>{
-    alert('✅ 发送任务启动');
-  });
-}
-
-function loadLog(){
-  fetch('/get_log').then(r=>r.json()).then(data=>{
-    sending_data = data;
-    renderLog();
-  });
-}
-
-function renderLog(){
-  const search = document.getElementById('log_search').value.toLowerCase();
-  const filtered = sending_data.filter(r=>r.email.toLowerCase().includes(search)||r.status.includes(search));
-  const total_pages = Math.ceil(filtered.length/sending_per_page);
-  if(sending_page>total_pages) sending_page=total_pages||1;
-  const start = (sending_page-1)*sending_per_page;
-  const page_data = filtered.slice(start,start+sending_per_page);
-
-  const logDiv=document.getElementById('log'); logDiv.innerHTML='';
-  page_data.forEach(r=>{
-    const div=document.createElement('div'); div.className='card';
-    div.textContent=`${r.email}: ${r.status}`;
-    logDiv.appendChild(div);
-  });
-  logDiv.scrollTop=logDiv.scrollHeight;
-
-  const pagDiv = document.getElementById('log_pagination'); pagDiv.innerHTML='';
-  for(let i=1;i<=total_pages;i++){
-    const btn = document.createElement('span'); btn.className='page-btn'+(i===sending_page?' active':''); btn.textContent=i;
-    btn.onclick = ()=>{ sending_page=i; renderLog(); };
-    pagDiv.appendChild(btn);
-  }
-}
-document.getElementById('log_search').addEventListener('input', renderLog);
-
-// ========== 账号状态 ==========
-function loadAccountUsage(){
-  fetch('/get_account_usage').then(r=>r.json()).then(data=>{
-    const div=document.getElementById('account_usage'); div.innerHTML='';
-    for(const [k,v] of Object.entries(data)){
-      const d=document.createElement('div'); d.className='card';
-      d.textContent=`${k}: 今日已发送 ${v} 封`;
-      div.appendChild(d);
-    }
-  });
-}
-setInterval(loadAccountUsage,5000);
-
-loadRecipients();
-loadAccountUsage();
-</script>
-</body>
-</html>
-"""
-
-if __name__=="__main__":
-    port=int(os.environ.get("PORT",10000))
-    app.run(host="0.0.0.0",port=port)
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port, threaded=True)
