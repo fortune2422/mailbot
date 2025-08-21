@@ -5,6 +5,8 @@ import time
 import datetime
 import json
 from flask import Flask, request, jsonify, render_template_string
+from email.mime.text import MIMEText
+from email.header import Header
 
 app = Flask(__name__)
 
@@ -55,11 +57,16 @@ def get_next_account():
 def send_email(account, to_email, subject, body):
     """发送邮件函数"""
     try:
-        msg = f"From: {account['email']}\nTo: {to_email}\nSubject: {subject}\n\n{body}"
+        # 创建邮件对象，UTF-8 编码
+        msg = MIMEText(body, "plain", "utf-8")
+        msg["From"] = account["email"]
+        msg["To"] = to_email
+        msg["Subject"] = Header(subject, "utf-8")
+
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
         server.starttls()
         server.login(account["email"], account["app_password"])
-        server.sendmail(account["email"], to_email, msg)
+        server.sendmail(account["email"], [to_email], msg.as_string())
         server.quit()
         account_usage[account["email"]] += 1
         return True, ""
