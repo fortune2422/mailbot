@@ -4,7 +4,7 @@ import os
 import time
 import random
 import datetime
-from flask import Flask, jsonify, send_file, request, render_template_string
+from flask import Flask, jsonify, render_template_string, request, redirect, url_for
 
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -14,6 +14,7 @@ app = Flask(__name__)
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 DAILY_LIMIT = 450  # 每个账号每日上限
+RECIPIENT_FILE = "recipient.csv"  # 收件箱列表文件
 
 # ========== 加载账号 ==========
 def load_accounts():
@@ -35,39 +36,19 @@ account_usage = {acc["email"]: 0 for acc in ACCOUNTS}
 last_reset_date = datetime.date.today()
 
 # ========== 收件箱列表 ==========
-INBOX_FILE = "inbox.csv"
-
-def load_inbox():
-    if not os.path.exists(INBOX_FILE):
+def load_recipients():
+    if not os.path.exists(RECIPIENT_FILE):
         return []
-    with open(INBOX_FILE, newline='', encoding="utf-8") as f:
+    with open(RECIPIENT_FILE, newline='', encoding="utf-8") as f:
         reader = csv.DictReader(f)
         return list(reader)
 
-def save_inbox(data):
-    with open(INBOX_FILE, "w", newline='', encoding="utf-8") as f:
-        if data:
-            fieldnames = data[0].keys()
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(data)
-        else:
-            f.write("")  # 空文件
-
-# ========== 已发送邮箱的记录 ==========
-SENT_FILE = "sent.csv"
-
-def load_sent_emails():
-    if not os.path.exists(SENT_FILE):
-        return set()
-    with open(SENT_FILE, newline='', encoding="utf-8") as f:
-        reader = csv.reader(f)
-        return {row[0] for row in reader}
-
-def save_sent_email(email):
-    with open(SENT_FILE, "a", newline='', encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow([email])
+def save_recipients(recipients):
+    with open(RECIPIENT_FILE, "w", newline='', encoding="utf-8") as f:
+        fieldnames = ["email", "name", "real_name"]
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(recipients)
 
 # ========== 辅助函数 ==========
 def reset_daily_usage():
@@ -89,18 +70,21 @@ def get_next_account():
 # ========== 发送邮件 ==========
 def send_emails(subject_template, body_template):
     reset_daily_usage()
-    sent_emails = load_sent_emails()
-    inbox = load_inbox()
-    results = []
+    recipients = load_recipients()
+    if not recipients:
+        return ["❌ 收件箱列表为空"]
 
-    for person in inbox:
+    results = []
+    remaining_recipients = []
+    for idx, person in enumerate(recipients, start=1):
         to_email = person.get("email")
-        if not to_email or to_email in sent_emails:
+        if not to_email:
             continue
 
         acc = get_next_account()
         if not acc:
             results.append("⚠️ 所有账号今天都达到上限，停止发送")
+            remaining_recipients.extend(recipients[idx-1:])
             break
 
         EMAIL = acc["email"]
@@ -108,13 +92,12 @@ def send_emails(subject_template, body_template):
         name = person.get("name", "Amigo")
         real_name = person.get("real_name", name)
 
-        subject = subject_template.replace("{name}", name).replace("{real_name}", real_name)
-        body = body_template.replace("{name}", name).replace("{real_name}", real_name)
-
         msg = MIMEMultipart()
         msg["From"] = EMAIL
         msg["To"] = to_email
-        msg["Subject"] = subject
+        msg["Subject"] = subject_template.replace("{name}", name).replace("{real_name}", real_name)
+
+        body = body_template.replace("{name}", name).replace("{real_name}", real_name)
         msg.attach(MIMEText(body, "plain"))
 
         try:
@@ -125,167 +108,207 @@ def send_emails(subject_template, body_template):
             server.quit()
 
             account_usage[EMAIL] += 1
-            save_sent_email(to_email)
-            results.append(f"✅ 已发送: {to_email} （账号 {EMAIL}，今日已发 {account_usage[EMAIL]} 封）")
+            results.append(f"✅ {idx}. 已发送: {to_email} （账号 {EMAIL}，今日已发 {account_usage[EMAIL]} 封）")
         except Exception as e:
-            results.append(f"❌ 发送失败: {to_email}, 错误: {e}")
+            results.append(f"❌ {idx}. 发送失败: {to_email}, 错误: {e}")
+            remaining_recipients.append(person)
             continue
 
-        time.sleep(random.randint(5, 15))
+        time.sleep(random.randint(3, 7))  # 简化等待时间
 
-    # 更新收件箱
-    inbox = [p for p in inbox if p.get("email") not in load_sent_emails()]
-    save_inbox(inbox)
+    # 保存剩余未发送的收件人
+    save_recipients(remaining_recipients)
     return results
 
 # ========== Flask 路由 ==========
-TEMPLATE = """
+
+# 主页面
+@app.route("/", methods=["GET"])
+def home():
+    return render_template_string(HOME_HTML)
+
+# 上传 CSV
+@app.route("/upload", methods=["POST"])
+def upload():
+    file = request.files.get("file")
+    if not file:
+        return jsonify({"status": "error", "message": "未选择文件"}), 400
+
+    rows = []
+    try:
+        reader = csv.DictReader(file.stream.read().decode("utf-8").splitlines())
+        for row in reader:
+            rows.append({
+                "email": row.get("email", "").strip(),
+                "name": row.get("name", "").strip(),
+                "real_name": row.get("real_name", "").strip()
+            })
+        existing = load_recipients()
+        # 去重
+        emails_existing = {r["email"] for r in existing}
+        new_rows = [r for r in rows if r["email"] not in emails_existing]
+        all_rows = existing + new_rows
+        save_recipients(all_rows)
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"解析文件失败: {e}"}), 400
+
+    return jsonify({"status": "success", "message": f"成功上传 {len(new_rows)} 条收件人"})
+
+# 发送邮件
+@app.route("/send", methods=["POST"])
+def trigger_send():
+    subject = request.form.get("subject", "")
+    body = request.form.get("body", "")
+    results = send_emails(subject, body)
+    return jsonify({"status": "success", "results": results})
+
+# 查看收件箱
+@app.route("/recipient", methods=["GET"])
+def recipient():
+    recipients = load_recipients()
+    return render_template_string(RECIPIENT_HTML, recipients=recipients)
+
+# 删除收件人
+@app.route("/delete_recipient", methods=["POST"])
+def delete_recipient():
+    email = request.form.get("email")
+    if not email:
+        return jsonify({"status": "error", "message": "未指定邮箱"}), 400
+
+    recipients = load_recipients()
+    recipients = [r for r in recipients if r["email"] != email]
+    save_recipients(recipients)
+    return jsonify({"status": "success", "message": f"{email} 已删除"})
+
+# 获取账号使用情况
+@app.route("/stats", methods=["GET"])
+def stats():
+    reset_daily_usage()
+    return jsonify(account_usage)
+
+# ========== 前端模板 ==========
+
+HOME_HTML = """
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>MailBot 后台</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
-    <style>
-        body { margin: 20px; }
-        textarea { resize: none; }
-        .log { background: #f8f9fa; padding: 10px; height: 250px; overflow-y: auto; border-radius: 5px; margin-top: 10px; }
-        .table-container { max-height: 300px; overflow-y: auto; }
-    </style>
+<meta charset="UTF-8">
+<title>邮件发送工具</title>
+<style>
+body { font-family: Arial, sans-serif; margin: 20px; background:#f5f5f5; }
+.container { max-width: 800px; margin:auto; padding:20px; background:white; border-radius:8px; box-shadow:0 0 10px rgba(0,0,0,0.1);}
+input, textarea, button { width: 100%; margin:5px 0; padding:8px; border-radius:4px; border:1px solid #ccc;}
+button { background:#4CAF50; color:white; border:none; cursor:pointer; }
+button:hover { background:#45a049; }
+.log { margin-top:10px; background:#eee; padding:10px; max-height:300px; overflow-y:auto; white-space:pre-wrap; }
+a { display:inline-block; margin-top:10px; text-decoration:none; color:#333; }
+</style>
 </head>
 <body>
 <div class="container">
-    <h1 class="mb-4">MailBot 后台</h1>
+<h2>邮件发送工具</h2>
+<label>上传收件箱 CSV：</label>
+<input type="file" id="fileInput">
+<button onclick="uploadFile()">上传</button>
 
-    <div class="mb-3">
-        <form id="uploadForm" enctype="multipart/form-data" class="d-flex gap-2">
-            <input class="form-control" type="file" name="file" required>
-            <button class="btn btn-primary" type="submit">上传 CSV</button>
-        </form>
-    </div>
+<label>邮件主题（支持 {name} / {real_name}）：</label>
+<input type="text" id="subject" placeholder="输入邮件主题">
 
-    <div class="mb-3">
-        <label class="form-label">主题模板</label>
-        <input class="form-control" type="text" id="subject" value="Olá {real_name}, sua recompensa VIP da JILI707 está disponível">
-    </div>
+<label>邮件正文（支持 {name} / {real_name}）：</label>
+<textarea id="body" rows="6" placeholder="输入邮件正文"></textarea>
+<button onclick="sendMail()">发送邮件</button>
 
-    <div class="mb-3">
-        <label class="form-label">正文模板</label>
-        <textarea class="form-control" id="body" rows="10">👋 Olá {real_name},
+<div class="log" id="sendLog"></div>
 
-Detectamos que você ainda não resgatou sua recompensa do mês de agosto.
-
-👉 Por favor, acesse sua conta e clique no ícone de promoções na parte inferior da página inicial para resgatar sua recompensa.
-
-💰 Lembrete: a recompensa será creditada automaticamente todo dia 1º de cada mês.
-
-✨ Quanto mais você evoluir sua conta, maiores serão os benefícios que poderá receber.
-
-📈 Continue evoluindo sua conta para desbloquear recompensas ainda maiores!
-
-— Equipe JILI707。vip
-</textarea>
-    </div>
-
-    <div class="mb-3 d-flex gap-2">
-        <button class="btn btn-success" id="sendBtn">发送邮件</button>
-        <button class="btn btn-warning" id="downloadBtn">下载已发送邮箱</button>
-    </div>
-
-    <h3>收件箱列表</h3>
-    <div class="table-container">
-        <table class="table table-bordered table-striped" id="inboxTable">
-            <thead>
-                <tr><th>Email</th><th>Name</th><th>Real Name</th></tr>
-            </thead>
-            <tbody></tbody>
-        </table>
-    </div>
-
-    <h3>发送日志</h3>
-    <div class="log" id="sendLog"></div>
+<a href="/recipient">查看收件箱列表</a>
 </div>
 
 <script>
-async function loadInbox() {
-    const resp = await fetch("/get-inbox");
-    const data = await resp.json();
-    const tbody = document.querySelector("#inboxTable tbody");
-    tbody.innerHTML = "";
-    data.forEach(person => {
-        const tr = document.createElement("tr");
-        tr.innerHTML = `<td>${person.email}</td><td>${person.name}</td><td>${person.real_name}</td>`;
-        tbody.appendChild(tr);
-    });
+function uploadFile() {
+    const file = document.getElementById('fileInput').files[0];
+    if(!file){ alert("请选择文件"); return; }
+    const formData = new FormData();
+    formData.append("file", file);
+
+    fetch("/upload", { method:"POST", body:formData })
+    .then(res=>res.json()).then(data=>{
+        alert(data.message);
+    }).catch(err=>{ alert("上传失败"); });
 }
 
-document.getElementById("uploadForm").onsubmit = async (e) => {
-    e.preventDefault();
-    const formData = new FormData(e.target);
-    const resp = await fetch("/upload", { method: "POST", body: formData });
-    const result = await resp.text();
-    alert(result);
-    loadInbox();
-};
-
-document.getElementById("sendBtn").onclick = async () => {
-    const subject = document.getElementById("subject").value;
-    const body = document.getElementById("body").value;
-    const resp = await fetch(`/send?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`);
-    const results = await resp.json();
-    const log = document.getElementById("sendLog");
-    results.forEach(r => {
-        const div = document.createElement("div");
-        div.textContent = r;
-        log.appendChild(div);
-    });
-    loadInbox();
-};
-
-document.getElementById("downloadBtn").onclick = () => {
-    window.open("/download-sent");
-};
-
-window.onload = loadInbox;
+function sendMail() {
+    const subject = document.getElementById('subject').value;
+    const body = document.getElementById('body').value;
+    fetch("/send", {
+        method:"POST",
+        headers: {'Content-Type':'application/x-www-form-urlencoded'},
+        body: `subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
+    })
+    .then(res=>res.json()).then(data=>{
+        if(data.results){
+            const log = document.getElementById("sendLog");
+            log.innerText = data.results.join("\\n");
+            alert("发送完成");
+        }
+    }).catch(err=>{ alert("发送失败"); });
+}
 </script>
 </body>
 </html>
 """
 
-@app.route("/", methods=["GET"])
-def home():
-    return render_template_string(TEMPLATE)
+RECIPIENT_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>收件箱列表</title>
+<style>
+body { font-family: Arial, sans-serif; margin: 20px; background:#f5f5f5; }
+.container { max-width: 900px; margin:auto; padding:20px; background:white; border-radius:8px; box-shadow:0 0 10px rgba(0,0,0,0.1);}
+.card { border:1px solid #ccc; padding:10px; margin:5px; border-radius:6px; display:flex; justify-content:space-between; align-items:center; background:#fafafa;}
+button { background:#f44336; color:white; border:none; padding:5px 10px; border-radius:4px; cursor:pointer;}
+button:hover { background:#d32f2f; }
+a { display:inline-block; margin-top:10px; text-decoration:none; color:#333; }
+</style>
+</head>
+<body>
+<div class="container">
+<h2>收件箱列表</h2>
+<div id="recipientList">
+{% for r in recipients %}
+<div class="card" id="card-{{r.email}}">
+    <div>
+        <strong>Email:</strong> {{r.email}}<br>
+        <strong>Name:</strong> {{r.name}}<br>
+        <strong>Real Name:</strong> {{r.real_name or ""}}
+    </div>
+    <button onclick="deleteRecipient('{{r.email}}')">删除</button>
+</div>
+{% endfor %}
+</div>
+<a href="/">返回主页面</a>
+</div>
 
-@app.route("/upload", methods=["POST"])
-def upload_csv():
-    file = request.files.get("file")
-    if not file:
-        return "❌ 未选择文件", 400
-    file.save(INBOX_FILE)
-    return "✅ 文件上传成功"
-
-@app.route("/get-inbox", methods=["GET"])
-def get_inbox():
-    inbox = load_inbox()
-    return jsonify(inbox)
-
-@app.route("/send", methods=["GET"])
-def trigger_send():
-    subject = request.args.get("subject", "")
-    body = request.args.get("body", "")
-    results = send_emails(subject, body)
-    return jsonify(results)
-
-@app.route("/download-sent", methods=["GET"])
-def download_sent():
-    if not os.path.exists(SENT_FILE):
-        with open(SENT_FILE, "w", newline='', encoding="utf-8") as f:
-            f.write("")
-    return send_file(SENT_FILE, as_attachment=True, download_name="sent.csv", mimetype="text/csv")
-
-@app.route("/stats", methods=["GET"])
-def stats():
-    reset_daily_usage()
-    return jsonify(account_usage)
+<script>
+function deleteRecipient(email){
+    if(!confirm("确认删除 "+email+" ?")) return;
+    fetch("/delete_recipient", {
+        method:"POST",
+        headers: {'Content-Type':'application/x-www-form-urlencoded'},
+        body:`email=${encodeURIComponent(email)}`
+    }).then(res=>res.json()).then(data=>{
+        alert(data.message);
+        if(data.status==="success"){
+            const card = document.getElementById("card-"+email);
+            if(card) card.remove();
+        }
+    }).catch(err=>{ alert("删除失败"); });
+}
+</script>
+</body>
+</html>
+"""
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
