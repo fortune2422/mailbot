@@ -67,6 +67,14 @@ def send_emails():
     except FileNotFoundError:
         return ["❌ emails.csv 文件未找到"]
 
+    seen_emails = set()
+    unique_recipients = []
+    for row in recipients:
+        email = row.get("email")
+        if email and email not in seen_emails:
+            unique_recipients.append(row)
+            seen_emails.add(email)
+
     results = []
 
     for idx, person in enumerate(recipients, start=1):
@@ -101,7 +109,7 @@ Detectamos que você ainda não resgatou sua recompensa do mês de agosto.
 
 📈 Continue evoluindo sua conta para desbloquear recompensas ainda maiores!
 
-— Equipe JILI707.vip
+— Equipe JILI707。vip
 """
         msg.attach(MIMEText(body, "plain"))
 
