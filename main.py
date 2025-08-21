@@ -220,7 +220,8 @@ def admin_home():
         subject = ""
         body = ""
 
-    return f'''
+    # 使用双大括号 {{}} 避免 Python f-string 报错
+    html = f"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -298,75 +299,70 @@ def admin_home():
 </div>
 
 <script>
-// 上传 CSV
-document.getElementById("uploadForm").addEventListener("submit", function(e){
+document.getElementById("uploadForm").addEventListener("submit", function(e){{
     e.preventDefault();
     const formData = new FormData(this);
-    fetch("/upload", {method:"POST", body: formData})
+    fetch("/upload", {{method:"POST", body: formData}})
         .then(res => res.text())
         .then(msg => alert(msg));
-});
+}});
 
-// 保存模板
-document.getElementById("composeForm").addEventListener("submit", function(e){
+document.getElementById("composeForm").addEventListener("submit", function(e){{
     e.preventDefault();
     const data = new FormData(this);
-    fetch("/compose", {method:"POST", body:data})
+    fetch("/compose", {{method:"POST", body:data}})
         .then(res => res.text())
         .then(msg => alert(msg));
-});
+}});
 
-// 重置已发送
-document.getElementById("resetBtn").addEventListener("click", function(){
-    if(confirm("确定要重置已发送记录吗？此操作不可撤销！")){
-        fetch("/reset-sent", {method:"POST"})
+document.getElementById("resetBtn").addEventListener("click", function(){{
+    if(confirm("确定要重置已发送记录吗？此操作不可撤销！")){{
+        fetch("/reset-sent", {{method:"POST"}})
             .then(res => res.text())
             .then(msg => alert(msg));
-    }
-});
+    }}
+}});
 
-// 开始发送
-document.getElementById("sendBtn").addEventListener("click", function(){
+document.getElementById("sendBtn").addEventListener("click", function(){{
     const log = document.getElementById("sendLog");
     log.innerHTML = "";
     const minDelay = document.getElementById("minDelay").value || {MIN_DELAY};
     const maxDelay = document.getElementById("maxDelay").value || {MAX_DELAY};
-    fetch(`/send-stream?min_delay=${minDelay}&max_delay=${maxDelay}`).then(response => {
+    fetch(`/send-stream?min_delay=${{minDelay}}&max_delay=${{maxDelay}}`).then(response => {{
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
-        function read(){
-            reader.read().then(({done, value})=>{
+        function read(){{
+            reader.read().then(({ {{"done", "value"}} }}) => {{
                 if(done) return;
                 log.innerHTML += decoder.decode(value);
                 log.scrollTop = log.scrollHeight;
                 read();
-            });
-        }
+            }});
+        }}
         read();
-    });
-});
+    }});
+}});
 
-// 日志操作
-function refreshLog(){
-    fetch("/log").then(res => res.text()).then(html => {
+function refreshLog(){{
+    fetch("/log").then(res => res.text()).then(html => {{
         document.getElementById("logPanel").innerHTML = html;
-    });
-}
+    }});
+}}
 document.getElementById("refreshLog").addEventListener("click", refreshLog);
-document.getElementById("clearLog").addEventListener("click", function(){
-    if(confirm("确定要清空日志吗？")){
-        fetch("/clear-log", {method:"POST"})
+document.getElementById("clearLog").addEventListener("click", function(){{
+    if(confirm("确定要清空日志吗？")){{
+        fetch("/clear-log", {{method:"POST"}})
             .then(res => res.text())
-            .then(msg => { alert(msg); refreshLog(); });
-    }
-});
+            .then(msg => {{ alert(msg); refreshLog(); }});
+    }}
+}});
 
-// 初始化日志
 refreshLog();
 </script>
 </body>
 </html>
-'''
+"""
+    return html
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
