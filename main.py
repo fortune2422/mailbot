@@ -59,7 +59,6 @@ def reset_daily_usage():
         last_reset_date = today
 
 def get_next_account():
-    """根据已勾选的账号轮流获取下一个可用账号"""
     global current_index
     selected_accounts = [acc for acc in ACCOUNTS if acc.get("selected", True)]
     if not selected_accounts:
@@ -67,7 +66,7 @@ def get_next_account():
     for _ in range(len(selected_accounts)):
         acc = selected_accounts[current_index % len(selected_accounts)]
         current_index = (current_index + 1) % len(selected_accounts)
-        if account_usage[acc["email"]] < DAILY_LIMIT:
+        if account_usage.get(acc["email"], 0) < DAILY_LIMIT:
             return acc
     return None
 
@@ -83,7 +82,7 @@ def send_email(account, to_email, subject, body):
         server.login(account["email"], account["app_password"])
         server.sendmail(account["email"], [to_email], msg.as_string())
         server.quit()
-        account_usage[account["email"]] += 1
+        account_usage[account["email"]] = account_usage.get(account["email"], 0) + 1
         return True, ""
     except Exception as e:
         return False, str(e)
@@ -141,8 +140,10 @@ def home():
         <div class="sidebar">
             <button onclick="showPage('recipients')">收件箱管理</button>
             <button onclick="showPage('send')">邮件发送</button>
+            <button onclick="showPage('accounts')">账号管理</button>
         </div>
         <div class="main">
+            <!-- 收件人管理 -->
             <div id="recipientsPage">
                 <h2>收件箱管理</h2>
                 <input type="file" id="csvFile">
@@ -160,6 +161,8 @@ def home():
                     </table>
                 </div>
             </div>
+
+            <!-- 邮件发送 -->
             <div id="sendPage" style="display:none;">
                 <h2>邮件发送</h2>
                 <div class="card">
@@ -185,38 +188,37 @@ def home():
                     <ul id="accountUsage"></ul>
                 </div>
             </div>
+
+            <!-- 账号管理 -->
+            <div id="accountsPage" style="display:none;">
+                <h2>账号管理</h2>
+                <input type="file" id="accountFile">
+                <button class="btn" onclick="uploadAccounts()">导入账号 CSV</button>
+                <div class="card" style="margin-top:10px;">
+                    <h3>账号列表</h3>
+                    <div id="accountList"></div>
+                </div>
+            </div>
         </div>
+
         <script>
             function showPage(page){
                 document.getElementById('recipientsPage').style.display = page==='recipients'?'block':'none';
                 document.getElementById('sendPage').style.display = page==='send'?'block':'none';
+                document.getElementById('accountsPage').style.display = page==='accounts'?'block':'none';
                 if(page==='recipients'){ loadRecipients(); }
                 if(page==='send'){ loadAccounts(); }
+                if(page==='accounts'){ loadAccountsList(); }
             }
 
-            function loadAccounts(){
-                fetch('/accounts').then(res=>res.json()).then(data=>{
-                    const div = document.getElementById('accountCheckboxes');
-                    div.innerHTML = '';
-                    data.forEach(acc=>{
-                        const id = acc.email.replace(/[@.]/g,'_');
-                        div.innerHTML += `<label><input type="checkbox" id="${id}" ${acc.selected?'checked':''} onchange="toggleAccount('${acc.email}', this.checked)"> ${acc.email}</label><br>`;
-                    });
-                });
-            }
-
-            function toggleAccount(email, checked){
-                fetch('/toggle-account', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email,checked})});
-            }
-
+            // ---------------- 收件人 ----------------
             function uploadCSV(){
                 const file = document.getElementById('csvFile').files[0];
                 if(!file){ alert("请选择文件"); return; }
                 const formData = new FormData();
                 formData.append('file', file);
                 fetch('/upload-csv', {method:'POST', body:formData})
-                .then(res=>res.json())
-                .then(data=>{
+                .then(res=>res.json()).then(data=>{
                     alert(data.message);
                     loadRecipients();
                 });
@@ -226,7 +228,7 @@ def home():
                 fetch('/recipients').then(res=>res.json()).then(data=>{
                     const tbody = document.querySelector('#recipientsTable tbody');
                     tbody.innerHTML = '';
-                    data.pending.forEach((r,i)=>{
+                    data.pending.forEach((r)=>{
                         const tr = document.createElement('tr');
                         tr.innerHTML = `<td>${r.email}</td><td>${r.name||''}</td><td>${r.real_name||''}</td>
                         <td><button onclick="deleteRecipient('${r.email}')">删除</button></td>`;
@@ -248,6 +250,22 @@ def home():
             function exportPending(){ window.location.href="/download-recipients?status=pending"; }
             function exportSent(){ window.location.href="/download-recipients?status=sent"; }
             function continueTask(){ window.location.href="/continue-task"; }
+
+            // ---------------- 邮件发送 ----------------
+            function loadAccounts(){
+                fetch('/accounts').then(res=>res.json()).then(data=>{
+                    const div = document.getElementById('accountCheckboxes');
+                    div.innerHTML = '';
+                    data.forEach(acc=>{
+                        const id = acc.email.replace(/[@.]/g,'_');
+                        div.innerHTML += `<label><input type="checkbox" id="${id}" ${acc.selected?'checked':''} onchange="toggleAccount('${acc.email}', this.checked)"> ${acc.email}</label><br>`;
+                    });
+                });
+            }
+
+            function toggleAccount(email, checked){
+                fetch('/toggle-account', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email,checked})});
+            }
 
             let evtSource;
             function startSend(){
@@ -283,13 +301,47 @@ def home():
             function resumeSend(){
                 fetch('/resume-send', {method:'POST'}).then(res=>res.json()).then(data=>alert(data.message));
             }
+
+            // ---------------- 账号管理 ----------------
+            function uploadAccounts(){
+                const file = document.getElementById('accountFile').files[0];
+                if(!file){ alert("请选择账号 CSV"); return; }
+                const formData = new FormData();
+                formData.append('file', file);
+                fetch('/upload-accounts', {method:'POST', body:formData})
+                .then(res=>res.json()).then(data=>{
+                    alert(data.message);
+                    loadAccountsList();
+                });
+            }
+
+            function loadAccountsList(){
+                fetch('/accounts').then(res=>res.json()).then(data=>{
+                    const div = document.getElementById('accountList');
+                    div.innerHTML = '';
+                    data.forEach(acc=>{
+                        const id = 'list_'+acc.email.replace(/[@.]/g,'_');
+                        div.innerHTML += `<div id="${id}">${acc.email} <button onclick="deleteAccount('${acc.email}')">删除</button></div>`;
+                    });
+                });
+            }
+
+            function deleteAccount(email){
+                fetch('/delete-account', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email})})
+                .then(res=>res.json()).then(data=>{
+                    alert(data.message);
+                    loadAccountsList();
+                    loadAccounts();
+                });
+            }
+
         </script>
     </body>
     </html>
     """
     return render_template_string(template)
 
-# ================== 邮件发送 ==================
+# ================== 邮件发送逻辑 ==================
 @app.route("/send", methods=["POST"])
 def start_send():
     global IS_SENDING, PAUSED
@@ -488,6 +540,31 @@ def toggle_account():
             acc["selected"] = checked
             break
     return jsonify({"message":"账号状态已更新"})
+
+@app.route("/upload-accounts", methods=["POST"])
+def upload_accounts():
+    file = request.files.get('file')
+    if not file:
+        return jsonify({"message":"未选择文件"}), 400
+    csv_data = file.read().decode('utf-8').splitlines()
+    reader = csv.DictReader(csv_data)
+    for row in reader:
+        ACCOUNTS.append({
+            "email": row.get("email"),
+            "app_password": row.get("app_password"),
+            "selected": True
+        })
+        account_usage[row.get("email")] = 0
+    return jsonify({"message":"账号上传成功"})
+
+@app.route("/delete-account", methods=["POST"])
+def delete_account():
+    data = request.json
+    email = data.get("email")
+    global ACCOUNTS
+    ACCOUNTS = [acc for acc in ACCOUNTS if acc["email"] != email]
+    account_usage.pop(email, None)
+    return jsonify({"message": f"{email} 已删除"})
 
 # ================== 启动 ==================
 if __name__ == "__main__":
