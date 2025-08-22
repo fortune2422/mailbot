@@ -16,33 +16,58 @@ app = Flask(__name__)
 # ================== 配置 ==================
 DAILY_LIMIT = 450
 RECIPIENTS_FILE = "recipients.json"
-LOG_FILE = "send_log.txt"
+LOG_FILE_JSON = "send_log.json"         # 新增：持久化日志（数组）
+USAGE_FILE_JSON = "account_usage.json"  # 新增：账号用量持久化
 
-# ================== 账号加载 ==================
-def load_accounts():
+# ================== 账号加载与持久化 ==================
+def load_accounts_from_env():
     accounts = []
     i = 1
     while True:
         email = os.getenv(f"EMAIL{i}")
         app_password = os.getenv(f"APP_PASSWORD{i}")
-        smtp_server = os.getenv(f"SMTP_SERVER{i}", "smtp.gmail.com")
-        smtp_port = int(os.getenv(f"SMTP_PORT{i}", 587))
+        smtp_server = os.getenv(f"SMTP_SERVER{i}")  # 可选覆盖
+        smtp_port = os.getenv(f"SMTP_PORT{i}")      # 可选覆盖
         if email and app_password:
-            accounts.append({
+            rec = {
                 "email": email,
                 "app_password": app_password,
-                "smtp_server": smtp_server,
-                "smtp_port": smtp_port,
                 "selected": True
-            })
+            }
+            if smtp_server:
+                rec["smtp_server"] = smtp_server
+            if smtp_port:
+                try:
+                    rec["smtp_port"] = int(smtp_port)
+                except:
+                    pass
+            accounts.append(rec)
             i += 1
         else:
             break
     return accounts
 
-ACCOUNTS = load_accounts()
+ACCOUNTS = load_accounts_from_env()
 current_index = 0
-account_usage = {acc["email"]: 0 for acc in ACCOUNTS}
+
+def load_usage():
+    if os.path.exists(USAGE_FILE_JSON):
+        try:
+            with open(USAGE_FILE_JSON, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_usage():
+    with open(USAGE_FILE_JSON, "w", encoding="utf-8") as f:
+        json.dump(account_usage, f, ensure_ascii=False, indent=2)
+
+account_usage = load_usage()
+# 确保为每个账号建立计数
+for acc in ACCOUNTS:
+    account_usage.setdefault(acc["email"], 0)
+
 last_reset_date = datetime.date.today()
 
 # ================== 收件人列表 ==================
@@ -56,15 +81,60 @@ PAUSED = False
 SEND_LOCK = Lock()
 EVENT_SUBSCRIBERS = []
 
+# ================== 日志持久化 ==================
+def load_logs():
+    if os.path.exists(LOG_FILE_JSON):
+        try:
+            with open(LOG_FILE_JSON, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+def save_logs(logs):
+    with open(LOG_FILE_JSON, "w", encoding="utf-8") as f:
+        json.dump(logs, f, ensure_ascii=False, indent=2)
+
+SEND_LOGS = load_logs()  # 列表元素形如：{"ts": "...", "msg": "已发送给 xxx"}
+
+def append_log(msg):
+    entry = {"ts": datetime.datetime.utcnow().isoformat() + "Z", "msg": msg}
+    SEND_LOGS.append(entry)
+    # 也写一份到 usage 一起，保证持久化
+    save_logs(SEND_LOGS)
+    save_usage()
+    # 推到 SSE
+    send_event({"log": msg, "usage": account_usage.copy()})
+
 # ================== 辅助函数 ==================
-def reset_daily_usage():
+def reset_daily_usage_if_needed():
     global account_usage, last_reset_date
     today = datetime.date.today()
     if today != last_reset_date:
-        account_usage = {acc["email"]: 0 for acc in ACCOUNTS}
+        # 新的一天，清零
+        for k in list(account_usage.keys()):
+            account_usage[k] = 0
         last_reset_date = today
+        save_usage()
+        append_log("已进入新的一天，账号发送计数已重置。")
+
+def infer_smtp(email):
+    """
+    根据邮箱域名自动推断 SMTP；也支持在 ACCOUNTS 中由每个账号条目覆盖 smtp_server/smtp_port。
+    """
+    domain = email.split("@")[-1].lower().strip()
+    # Office/Hotmail/Outlook 系列
+    outlook_domains = {"outlook.com", "hotmail.com", "live.com", "msn.com", "outlook.cn"}
+    if domain in outlook_domains:
+        return ("smtp.office365.com", 587)
+    # Gmail
+    if domain == "gmail.com":
+        return ("smtp.gmail.com", 587)
+    # 其他未知域，默认走 587，你也可以改成自家企业邮箱
+    return ("smtp." + domain, 587)
 
 def get_next_account():
+    """根据已勾选的账号轮流获取下一个可用账号"""
     global current_index
     selected_accounts = [acc for acc in ACCOUNTS if acc.get("selected", True)]
     if not selected_accounts:
@@ -72,23 +142,33 @@ def get_next_account():
     for _ in range(len(selected_accounts)):
         acc = selected_accounts[current_index % len(selected_accounts)]
         current_index = (current_index + 1) % len(selected_accounts)
-        if account_usage.get(acc["email"], 0) < DAILY_LIMIT:
+        count = account_usage.get(acc["email"], 0)
+        if count < DAILY_LIMIT:
             return acc
     return None
 
 def send_email(account, to_email, subject, body):
     try:
+        # SMTP 选择：优先用账号条目自带覆盖；否则根据域名推断
+        smtp_server, smtp_port = infer_smtp(account["email"])
+        if "smtp_server" in account:
+            smtp_server = account["smtp_server"]
+        if "smtp_port" in account:
+            smtp_port = int(account["smtp_port"])
+
         msg = MIMEText(body, "plain", "utf-8")
         msg["From"] = account["email"]
         msg["To"] = to_email
         msg["Subject"] = Header(subject, "utf-8")
 
-        server = smtplib.SMTP(account["smtp_server"], account["smtp_port"])
+        server = smtplib.SMTP(smtp_server, smtp_port)
         server.starttls()
         server.login(account["email"], account["app_password"])
         server.sendmail(account["email"], [to_email], msg.as_string())
         server.quit()
+
         account_usage[account["email"]] = account_usage.get(account["email"], 0) + 1
+        save_usage()
         return True, ""
     except Exception as e:
         return False, str(e)
@@ -107,11 +187,6 @@ def load_recipients():
     else:
         RECIPIENTS, SENT_RECIPIENTS = [], []
 
-def log_message(msg):
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(msg + "\n")
-    send_event({"log": msg, "usage": account_usage.copy()})
-
 def send_event(data):
     for subscriber in EVENT_SUBSCRIBERS:
         try:
@@ -119,47 +194,76 @@ def send_event(data):
         except:
             pass
 
-# ================== 前端页面 ==================
+# ================== 前端页面（完整 HTML 内嵌） ==================
 @app.route("/", methods=["GET"])
 def home():
     template = """
     <!DOCTYPE html>
-    <html lang="en">
+    <html lang="zh-CN">
     <head>
         <meta charset="UTF-8">
         <title>MailBot 后台</title>
         <style>
-            body { font-family: Arial; margin:0; padding:0; display:flex; height:100vh; background:#f5f5f5;}
-            .sidebar { width:200px; background:#2f4050; color:#fff; display:flex; flex-direction:column; }
-            .sidebar button { padding:15px; background:none; border:none; color:#fff; cursor:pointer; text-align:left; font-size:16px; border-bottom:1px solid #3c4b5a;}
-            .sidebar button:hover { background:#1ab394;}
+            :root{
+              --brand:#1ab394;
+              --brand-dark:#18a689;
+              --danger:#e74c3c;
+              --danger-dark:#c0392b;
+              --bg:#f5f5f5;
+              --sidebar:#2f4050;
+              --line:#e6e6e6;
+            }
+            *{box-sizing:border-box}
+            body { font-family: Arial, Helvetica, sans-serif; margin:0; padding:0; display:flex; height:100vh; background:var(--bg);}
+            .sidebar { width:220px; background:var(--sidebar); color:#fff; display:flex; flex-direction:column; }
+            .sidebar h1{font-size:18px; font-weight:600; padding:16px; border-bottom:1px solid #3c4b5a; margin:0;}
+            .sidebar button { padding:14px 16px; background:none; border:none; color:#fff; cursor:pointer; text-align:left; font-size:15px; border-bottom:1px solid #3c4b5a;}
+            .sidebar button:hover, .sidebar button.active { background:var(--brand);}
             .main { flex:1; padding:20px; overflow:auto;}
-            .card { background:#fff; padding:15px; margin-bottom:15px; box-shadow:0 2px 5px rgba(0,0,0,0.1);}
+            .card { background:#fff; padding:16px; margin-bottom:16px; box-shadow:0 2px 5px rgba(0,0,0,0.08); border-radius:12px; border:1px solid var(--line);}
             table { width:100%; border-collapse: collapse;}
-            th, td { border:1px solid #ddd; padding:8px; text-align:left;}
-            th { background:#f2f2f2;}
-            .btn { padding:6px 12px; background:#1ab394; color:#fff; border:none; cursor:pointer; border-radius:4px; margin:2px;}
-            .btn:hover { background:#18a689;}
-            .account-item { display:flex; justify-content:space-between; padding:5px 0; border-bottom:1px solid #ddd; align-items:center;}
+            th, td { border:1px solid #ddd; padding:8px; text-align:left; font-size:14px;}
+            th { background:#f9f9f9;}
+            .btn { padding:8px 14px; background:var(--brand); color:#fff; border:none; cursor:pointer; border-radius:10px;}
+            .btn:hover { background:var(--brand-dark);}
+            .btn-danger { background:var(--danger);}
+            .btn-danger:hover { background:var(--danger-dark);}
+            .muted{ color:#888; font-size:12px;}
+            input[type="text"], input[type="number"], textarea{ border:1px solid #ddd; border-radius:10px; padding:8px; }
+            #accountList .item{ display:flex; align-items:center; justify-content:space-between; padding:10px 12px; border:1px solid var(--line); border-radius:10px; margin-bottom:8px; }
+            #accountList .left{ display:flex; gap:10px; align-items:center;}
+            .pill{ padding:3px 8px; border-radius:999px; background:#f2f2f2; font-size:12px;}
+            .danger-link{ background:transparent; border:1px solid var(--danger); color:var(--danger); padding:6px 10px; border-radius:999px; cursor:pointer; }
+            .danger-link:hover{ background:var(--danger); color:#fff; }
+            .row{ display:flex; gap:10px; flex-wrap:wrap; align-items:center;}
+            .row > *{ margin-top:6px;}
+            ul{ margin:8px 0 0 18px; padding:0;}
+            li{ margin:4px 0;}
+            .checkbox-line{ margin-bottom:4px;}
         </style>
     </head>
     <body>
         <div class="sidebar">
-            <button onclick="showPage('recipients')">收件箱管理</button>
-            <button onclick="showPage('send')">邮件发送</button>
-            <button onclick="showPage('accounts')">账号管理</button>
+            <h1>MailBot 控制台</h1>
+            <button id="tabRecipients" onclick="showPage('recipients')">收件箱管理</button>
+            <button id="tabSend" onclick="showPage('send')">邮件发送</button>
+            <button id="tabAccounts" onclick="showPage('accounts')">账号管理</button>
         </div>
         <div class="main">
             <!-- 收件人管理 -->
             <div id="recipientsPage">
-                <h2>收件箱管理</h2>
-                <input type="file" id="csvFile">
-                <button class="btn" onclick="uploadCSV()">上传 CSV</button>
-                <button class="btn" onclick="clearRecipients()">一键清空列表</button>
-                <button class="btn" onclick="downloadTemplate()">下载 CSV 模板</button>
-                <button class="btn" onclick="exportPending()">导出未发送收件人</button>
-                <button class="btn" onclick="exportSent()">导出已发送收件人</button>
-                <button class="btn" onclick="continueTask()">继续上次任务</button>
+                <div class="card">
+                    <h2>收件箱管理</h2>
+                    <div class="row">
+                        <input type="file" id="csvFile">
+                        <button class="btn" onclick="uploadCSV()">上传 CSV</button>
+                        <button class="btn" onclick="clearRecipients()">一键清空列表</button>
+                        <button class="btn" onclick="downloadTemplate()">下载 CSV 模板</button>
+                        <button class="btn" onclick="exportPending()">导出未发送收件人</button>
+                        <button class="btn" onclick="exportSent()">导出已发送收件人</button>
+                        <button class="btn" onclick="continueTask()">继续上次任务</button>
+                    </div>
+                </div>
                 <div class="card" style="margin-top:10px;">
                     <h3>收件箱列表</h3>
                     <table id="recipientsTable">
@@ -171,22 +275,28 @@ def home():
 
             <!-- 邮件发送 -->
             <div id="sendPage" style="display:none;">
-                <h2>邮件发送</h2>
                 <div class="card">
-                    <label>选择发送账号:</label><br>
-                    <div id="accountCheckboxes"></div>
-                    <br>
-                    <label>主题:</label><br>
-                    <input type="text" id="subject" style="width:100%" placeholder="请输入主题, 可用 {name} {real_name}">
-                    <br><br>
-                    <label>正文:</label><br>
-                    <textarea id="body" style="width:100%;height:150px;" placeholder="请输入正文, 可用 {name} {real_name}"></textarea>
-                    <br><br>
-                    <label>发送间隔(秒):</label>
-                    <input type="number" id="interval" value="5" style="width:60px;">
-                    <button class="btn" onclick="startSend()">开始发送</button>
-                    <button class="btn" onclick="pauseSend()">暂停</button>
-                    <button class="btn" onclick="resumeSend()">继续</button>
+                    <h2>邮件发送</h2>
+                    <div class="muted">主题/正文可用变量：<code>{name}</code>、<code>{real_name}</code></div>
+                    <div class="row" style="margin-top:6px;">
+                        <label>主题:</label>
+                        <input type="text" id="subject" style="flex:1; min-width:280px;" placeholder="请输入主题, 可用 {name} {real_name}">
+                    </div>
+                    <div class="row">
+                        <label>正文:</label>
+                    </div>
+                    <textarea id="body" style="width:100%;height:160px;" placeholder="请输入正文, 可用 {name} {real_name}"></textarea>
+                    <div class="row">
+                        <label>选择发送账号:</label>
+                        <div id="accountCheckboxes"></div>
+                    </div>
+                    <div class="row">
+                        <label>发送间隔(秒):</label>
+                        <input type="number" id="interval" value="5" style="width:80px;">
+                        <button class="btn" onclick="startSend()">开始发送</button>
+                        <button class="btn" onclick="pauseSend()">暂停</button>
+                        <button class="btn" onclick="resumeSend()">继续</button>
+                    </div>
                 </div>
                 <div class="card" style="margin-top:10px;">
                     <h3>实时发送进度</h3>
@@ -198,9 +308,14 @@ def home():
 
             <!-- 账号管理 -->
             <div id="accountsPage" style="display:none;">
-                <h2>账号管理</h2>
-                <input type="file" id="accountFile">
-                <button class="btn" onclick="uploadAccounts()">导入账号 CSV</button>
+                <div class="card">
+                    <h2>账号管理</h2>
+                    <div class="muted">支持从 CSV 导入：列名 <code>email</code>、<code>app_password</code>、（可选）<code>smtp_server</code>、<code>smtp_port</code>。</div>
+                    <div class="row" style="margin-top:6px;">
+                        <input type="file" id="accountFile">
+                        <button class="btn" onclick="uploadAccounts()">导入账号 CSV</button>
+                    </div>
+                </div>
                 <div class="card" style="margin-top:10px;">
                     <h3>账号列表</h3>
                     <div id="accountList"></div>
@@ -209,12 +324,23 @@ def home():
         </div>
 
         <script>
+            // 选项卡激活态
+            function activeTab(tab){
+                document.getElementById('tabRecipients').classList.remove('active');
+                document.getElementById('tabSend').classList.remove('active');
+                document.getElementById('tabAccounts').classList.remove('active');
+                if(tab==='recipients') document.getElementById('tabRecipients').classList.add('active');
+                if(tab==='send') document.getElementById('tabSend').classList.add('active');
+                if(tab==='accounts') document.getElementById('tabAccounts').classList.add('active');
+            }
+
             function showPage(page){
                 document.getElementById('recipientsPage').style.display = page==='recipients'?'block':'none';
                 document.getElementById('sendPage').style.display = page==='send'?'block':'none';
                 document.getElementById('accountsPage').style.display = page==='accounts'?'block':'none';
+                activeTab(page);
                 if(page==='recipients'){ loadRecipients(); }
-                if(page==='send'){ loadAccounts(); }
+                if(page==='send'){ loadAccounts(); loadLogsAndUsage(); startEventSource(); }
                 if(page==='accounts'){ loadAccountsList(); }
             }
 
@@ -238,7 +364,7 @@ def home():
                     data.pending.forEach((r)=>{
                         const tr = document.createElement('tr');
                         tr.innerHTML = `<td>${r.email}</td><td>${r.name||''}</td><td>${r.real_name||''}</td>
-                        <td><button class="btn" onclick="deleteRecipient('${r.email}')">删除</button></td>`;
+                        <td><button class="danger-link" onclick="deleteRecipient('${r.email}')">删除</button></td>`;
                         tbody.appendChild(tr);
                     });
                 });
@@ -265,7 +391,10 @@ def home():
                     div.innerHTML = '';
                     data.forEach(acc=>{
                         const id = acc.email.replace(/[@.]/g,'_');
-                        div.innerHTML += `<label><input type="checkbox" id="${id}" ${acc.selected?'checked':''} onchange="toggleAccount('${acc.email}', this.checked)"> ${acc.email}</label><br>`;
+                        div.innerHTML += `<div class="checkbox-line">
+                            <label><input type="checkbox" id="${id}" ${acc.selected?'checked':''} onchange="toggleAccount('${acc.email}', this.checked)"> ${acc.email}
+                            ${acc.smtp_server?'<span class="pill">'+acc.smtp_server+(acc.smtp_port?(':'+acc.smtp_port):'')+'</span>':''}
+                            </label></div>`;
                     });
                 });
             }
@@ -282,24 +411,54 @@ def home():
                 if(!subject || !body){ alert("请填写主题和正文"); return; }
                 fetch('/send', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({subject,body,interval})})
                 .then(res=>res.json()).then(data=>{ alert(data.message); });
-                startEventSource();
+                // SSE 在 showPage('send') 时已经启动，这里无需重复
             }
 
             function startEventSource(){
+                if(evtSource){ evtSource.close(); }
                 evtSource = new EventSource('/send-stream');
                 const log = document.getElementById('sendLog');
                 const usage = document.getElementById('accountUsage');
-                log.innerHTML=''; usage.innerHTML='';
                 evtSource.onmessage = function(e){
                     const d = JSON.parse(e.data);
-                    if(d.log) log.innerHTML += `<li>${d.log}</li>`;
+                    if(d.log){
+                        const li = document.createElement('li');
+                        li.textContent = d.log;
+                        log.appendChild(li);
+                    }
                     if(d.usage){
                         usage.innerHTML='';
                         for(const acc in d.usage){
-                            usage.innerHTML += `<li>${acc}: ${d.usage[acc]}</li>`;
+                            const li = document.createElement('li');
+                            li.textContent = acc + ': ' + d.usage[acc];
+                            usage.appendChild(li);
                         }
                     }
                 }
+            }
+
+            function loadLogsAndUsage(){
+                // 回放历史日志
+                fetch('/get-logs').then(res=>res.json()).then(data=>{
+                    const log = document.getElementById('sendLog');
+                    log.innerHTML = '';
+                    data.logs.forEach(item=>{
+                        const li = document.createElement('li');
+                        li.textContent = '[' + item.ts + '] ' + item.msg;
+                        log.appendChild(li);
+                    });
+                });
+                // 读取历史用量
+                fetch('/get-usage').then(res=>res.json()).then(data=>{
+                    const usage = document.getElementById('accountUsage');
+                    usage.innerHTML = '';
+                    const map = data.usage || {};
+                    for(const acc in map){
+                        const li = document.createElement('li');
+                        li.textContent = acc + ': ' + map[acc];
+                        usage.appendChild(li);
+                    }
+                });
             }
 
             function pauseSend(){
@@ -319,6 +478,7 @@ def home():
                 .then(res=>res.json()).then(data=>{
                     alert(data.message);
                     loadAccountsList();
+                    loadAccounts();
                 });
             }
 
@@ -328,10 +488,17 @@ def home():
                     div.innerHTML = '';
                     data.forEach(acc=>{
                         const id = 'list_'+acc.email.replace(/[@.]/g,'_');
-                        div.innerHTML += `<div class="account-item" id="${id}">
-                            <span>${acc.email}</span>
-                            <button class="btn" onclick="deleteAccount('${acc.email}')">删除</button>
-                        </div>`;
+                        div.innerHTML += `
+                          <div class="item" id="${id}">
+                            <div class="left">
+                              <strong>${acc.email}</strong>
+                              ${acc.smtp_server?'<span class="pill">'+acc.smtp_server+(acc.smtp_port?(':'+acc.smtp_port):'')+'</span>':''}
+                              <span class="pill">${acc.selected?'已启用':'未启用'}</span>
+                            </div>
+                            <div class="right">
+                              <button class="btn-danger" onclick="deleteAccount('${acc.email}')">删除</button>
+                            </div>
+                          </div>`;
                     });
                 });
             }
@@ -345,6 +512,8 @@ def home():
                 });
             }
 
+            // 初始默认
+            showPage('recipients');
         </script>
     </body>
     </html>
@@ -358,7 +527,7 @@ def start_send():
     data = request.json
     subject = data.get("subject")
     body = data.get("body")
-    interval = int(data.get("interval",5))
+    interval = int(data.get("interval", 5))
     if not subject or not body:
         return jsonify({"message":"主题和正文不能为空"}), 400
     SEND_QUEUE.append({"subject":subject,"body":body,"interval":interval})
@@ -372,7 +541,7 @@ def start_send():
 def send_worker_loop():
     global IS_SENDING, PAUSED
     while SEND_QUEUE:
-        reset_daily_usage()
+        reset_daily_usage_if_needed()
         task = SEND_QUEUE[0]
         subject = task["subject"]
         body = task["body"]
@@ -392,7 +561,7 @@ def send_worker_loop():
 
         acc = get_next_account()
         if not acc:
-            log_message("没有可用账号或账号今日已达上限")
+            append_log("没有可用账号或账号今日已达上限，等待 60 秒后重试。")
             time.sleep(60)
             with SEND_LOCK:
                 RECIPIENTS.insert(0, recipient)
@@ -406,7 +575,7 @@ def send_worker_loop():
             personalized_subject = subject.format(**recipient_safe)
             personalized_body = body.format(**recipient_safe)
         except Exception as e:
-            log_message(f"内容格式错误 {recipient['email']}: {e}")
+            append_log(f"内容格式错误 {recipient['email']}: {e}")
             with SEND_LOCK:
                 RECIPIENTS.append(recipient)
             continue
@@ -414,13 +583,15 @@ def send_worker_loop():
         success, err = send_email(acc, recipient["email"], personalized_subject, personalized_body)
         if success:
             SENT_RECIPIENTS.append(recipient)
-            log_message(f"已发送给 {recipient['email']} (使用账号 {acc['email']})")
+            save_recipients()
+            append_log(f"已发送给 {recipient['email']} (使用账号 {acc['email']})")
         else:
-            log_message(f"发送失败 {recipient['email']} : {err}")
+            append_log(f"发送失败 {recipient['email']} : {err}")
             with SEND_LOCK:
                 RECIPIENTS.append(recipient)
-        save_recipients()
+
         time.sleep(interval)
+
     IS_SENDING = False
     with SEND_LOCK:
         if SEND_QUEUE:
@@ -446,10 +617,20 @@ def send_stream():
         try:
             while True:
                 data = q.get()
-                yield f"data: {data}\n\n"
+                yield f"data: {data}\\n\\n"
         except GeneratorExit:
-            EVENT_SUBSCRIBERS.remove(q)
+            if q in EVENT_SUBSCRIBERS:
+                EVENT_SUBSCRIBERS.remove(q)
     return Response(event_stream(), mimetype="text/event-stream")
+
+# ======= 历史日志 / 用量：用于刷新后回放 =======
+@app.route("/get-logs")
+def get_logs():
+    return jsonify({"logs": SEND_LOGS})
+
+@app.route("/get-usage")
+def get_usage():
+    return jsonify({"usage": account_usage})
 
 # ================== 收件人管理 ==================
 @app.route("/continue-task")
@@ -476,12 +657,15 @@ def upload_csv():
     csv_data = file.read().decode('utf-8').splitlines()
     reader = csv.DictReader(csv_data)
     for row in reader:
+        if not row.get("email"):
+            continue
         RECIPIENTS.append({
-            "email": row.get("email"),
-            "name": row.get("name",""),
-            "real_name": row.get("real_name","")
+            "email": row.get("email").strip(),
+            "name": row.get("name","").strip(),
+            "real_name": row.get("real_name","").strip()
         })
     save_recipients()
+    append_log(f"已导入收件人 {len(RECIPIENTS)} 条（包含历史未发送）。")
     return jsonify({"message":"CSV 上传成功"})
 
 @app.route("/delete-recipient", methods=["POST"])
@@ -491,13 +675,16 @@ def delete_recipient():
     global RECIPIENTS
     RECIPIENTS = [r for r in RECIPIENTS if r["email"] != email]
     save_recipients()
+    append_log(f"已删除收件人 {email}")
     return jsonify({"message": f"{email} 已删除"})
 
 @app.route("/clear-recipients", methods=["POST"])
 def clear_recipients():
     global RECIPIENTS
+    count = len(RECIPIENTS)
     RECIPIENTS = []
     save_recipients()
+    append_log(f"已清空未发送收件人 {count} 条")
     return jsonify({"message":"收件人列表已清空"})
 
 @app.route("/download-template")
@@ -547,8 +734,9 @@ def toggle_account():
     checked = data.get("checked")
     for acc in ACCOUNTS:
         if acc["email"] == email:
-            acc["selected"] = checked
+            acc["selected"] = bool(checked)
             break
+    append_log(f"账号 {email} 已{ '启用' if checked else '禁用' }")
     return jsonify({"message":"账号状态已更新"})
 
 @app.route("/upload-accounts", methods=["POST"])
@@ -558,15 +746,34 @@ def upload_accounts():
         return jsonify({"message":"未选择文件"}), 400
     csv_data = file.read().decode('utf-8').splitlines()
     reader = csv.DictReader(csv_data)
+    added = 0
     for row in reader:
-        ACCOUNTS.append({
-            "email": row.get("email"),
-            "app_password": row.get("app_password"),
-            "smtp_server": row.get("smtp_server","smtp.gmail.com"),
-            "smtp_port": int(row.get("smtp_port",587)),
+        email = (row.get("email") or "").strip()
+        app_password = (row.get("app_password") or "").strip()
+        if not email or not app_password:
+            continue
+        rec = {
+            "email": email,
+            "app_password": app_password,
             "selected": True
-        })
-        account_usage[row.get("email")] = 0
+        }
+        if row.get("smtp_server"):
+            rec["smtp_server"] = row.get("smtp_server").strip()
+        if row.get("smtp_port"):
+            try:
+                rec["smtp_port"] = int(row.get("smtp_port"))
+            except:
+                pass
+        # 若已存在同邮箱，则覆盖更新
+        existing_idx = next((i for i,a in enumerate(ACCOUNTS) if a["email"]==email), None)
+        if existing_idx is not None:
+            ACCOUNTS[existing_idx] = rec
+        else:
+            ACCOUNTS.append(rec)
+        account_usage.setdefault(email, 0)
+        added += 1
+    save_usage()
+    append_log(f"已导入/更新账号 {added} 个")
     return jsonify({"message":"账号上传成功"})
 
 @app.route("/delete-account", methods=["POST"])
@@ -576,10 +783,16 @@ def delete_account():
     global ACCOUNTS
     ACCOUNTS = [acc for acc in ACCOUNTS if acc["email"] != email]
     account_usage.pop(email, None)
+    save_usage()
+    append_log(f"已删除账号 {email}")
     return jsonify({"message": f"{email} 已删除"})
 
 # ================== 启动 ==================
 if __name__ == "__main__":
     load_recipients()
-    port = int(os.environ.get("PORT",10000))
+    # 再次校验 usage 中包含所有 ENV 账号
+    for acc in ACCOUNTS:
+        account_usage.setdefault(acc["email"], 0)
+    save_usage()
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, threaded=True)
