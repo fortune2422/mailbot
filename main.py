@@ -4,10 +4,12 @@ import smtplib
 import time
 import datetime
 import json
-from flask import Flask, request, jsonify, render_template_string, send_file
+from flask import Flask, request, jsonify, render_template_string, send_file, Response
 from email.mime.text import MIMEText
 from email.header import Header
 from io import StringIO
+from threading import Thread, Lock
+from queue import Queue
 
 app = Flask(__name__)
 
@@ -37,14 +39,16 @@ current_index = 0
 account_usage = {acc["email"]: 0 for acc in ACCOUNTS}
 last_reset_date = datetime.date.today()
 
-# 收件人列表
+# ================== 收件人列表 ==================
 RECIPIENTS = []
 SENT_RECIPIENTS = []
 
-# 发送控制
+# ================== 发送控制 ==================
 SEND_QUEUE = []
 IS_SENDING = False
 PAUSED = False
+SEND_LOCK = Lock()
+EVENT_SUBSCRIBERS = []
 
 # ================== 辅助函数 ==================
 def reset_daily_usage():
@@ -97,6 +101,14 @@ def load_recipients():
 def log_message(msg):
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(msg + "\n")
+    send_event({"log": msg, "usage": account_usage.copy()})
+
+def send_event(data):
+    for subscriber in EVENT_SUBSCRIBERS:
+        try:
+            subscriber.put(json.dumps(data))
+        except:
+            pass
 
 # ================== 前端页面 ==================
 @app.route("/", methods=["GET"])
@@ -252,7 +264,90 @@ def home():
     """
     return render_template_string(template)
 
-# ================== 继续上次任务接口 ==================
+# ================== 以下接口同之前补全版本 ==================
+@app.route("/send", methods=["POST"])
+def start_send():
+    global IS_SENDING, PAUSED
+    data = request.json
+    subject = data.get("subject")
+    body = data.get("body")
+    interval = int(data.get("interval",5))
+    if not subject or not body:
+        return jsonify({"message":"主题和正文不能为空"}), 400
+    SEND_QUEUE.append({"subject":subject,"body":body,"interval":interval})
+    if not IS_SENDING:
+        IS_SENDING = True
+        PAUSED = False
+        t = Thread(target=send_worker, args=(subject,body,interval), daemon=True)
+        t.start()
+    return jsonify({"message":"邮件发送任务已启动"})
+
+def send_worker(subject, body, interval):
+    global IS_SENDING, PAUSED
+    while SEND_QUEUE:
+        reset_daily_usage()
+        if PAUSED:
+            time.sleep(1)
+            continue
+        recipient = None
+        with SEND_LOCK:
+            if RECIPIENTS:
+                recipient = RECIPIENTS.pop(0)
+        if not recipient:
+            break
+        acc = get_next_account()
+        if not acc:
+            log_message("所有账号今日已达上限")
+            time.sleep(60)
+            continue
+        personalized_subject = subject.format(**recipient)
+        personalized_body = body.format(**recipient)
+        success, err = send_email(acc, recipient["email"], personalized_subject, personalized_body)
+        if success:
+            SENT_RECIPIENTS.append(recipient)
+            log_message(f"已发送给 {recipient['email']}")
+        else:
+            log_message(f"发送失败 {recipient['email']} : {err}")
+            with SEND_LOCK:
+                RECIPIENTS.append(recipient)
+        save_recipients()
+        time.sleep(interval)
+    IS_SENDING = False
+
+@app.route("/pause-send", methods=["POST"])
+def pause_send():
+    global PAUSED
+    PAUSED = True
+    return jsonify({"message":"发送已暂停"})
+
+@app.route("/resume-send", methods=["POST"])
+def resume_send():
+    global PAUSED
+    PAUSED = False
+    return jsonify({"message":"发送已继续"})
+
+@app.route("/stop-send", methods=["POST"])
+def stop_send():
+    global IS_SENDING, PAUSED, SEND_QUEUE
+    IS_SENDING = False
+    PAUSED = False
+    SEND_QUEUE.clear()
+    return jsonify({"message":"发送已停止"})
+
+@app.route("/send-stream")
+def send_stream():
+    def event_stream():
+        q = Queue()
+        EVENT_SUBSCRIBERS.append(q)
+        try:
+            while True:
+                data = q.get()
+                yield f"data: {data}\n\n"
+        except GeneratorExit:
+            EVENT_SUBSCRIBERS.remove(q)
+    return Response(event_stream(), mimetype="text/event-stream")
+
+# 继续上次任务
 @app.route("/continue-task")
 def continue_task():
     global SEND_QUEUE, IS_SENDING, PAUSED
@@ -262,13 +357,79 @@ def continue_task():
         PAUSED = False
     return jsonify({"message":"已加载上次未完成任务，可开始发送"})
 
+# 收件人接口
+@app.route("/recipients", methods=["GET"])
+def get_recipients():
+    return jsonify({"pending": RECIPIENTS, "sent": SENT_RECIPIENTS})
 
-# ================== 以下接口和之前版本一样 ==================
-# /upload-csv /recipients /delete-recipient /clear-recipients
-# /download-template /download-recipients
-# /send /pause-send /resume-send /stop-send /send-stream
-# ... （省略，为节省篇幅，可直接沿用我上一个完整版本）
-# 启动
+@app.route("/upload-csv", methods=["POST"])
+def upload_csv():
+    file = request.files.get('file')
+    if not file:
+        return jsonify({"message":"未选择文件"}), 400
+    csv_data = file.read().decode('utf-8').splitlines()
+    reader = csv.DictReader(csv_data)
+    for row in reader:
+        RECIPIENTS.append({
+            "email": row.get("email"),
+            "name": row.get("name"),
+            "real_name": row.get("real_name")
+        })
+    save_recipients()
+    return jsonify({"message":"CSV 上传成功"})
+
+@app.route("/delete-recipient", methods=["POST"])
+def delete_recipient():
+    data = request.json
+    email = data.get("email")
+    global RECIPIENTS
+    RECIPIENTS = [r for r in RECIPIENTS if r["email"] != email]
+    save_recipients()
+    return jsonify({"message": f"{email} 已删除"})
+
+@app.route("/clear-recipients", methods=["POST"])
+def clear_recipients():
+    global RECIPIENTS
+    RECIPIENTS = []
+    save_recipients()
+    return jsonify({"message":"收件人列表已清空"})
+
+@app.route("/download-template")
+def download_template():
+    output = StringIO()
+    writer = csv.DictWriter(output, fieldnames=["email","name","real_name"])
+    writer.writeheader()
+    output.seek(0)
+    return send_file(
+        StringIO(output.getvalue()),
+        mimetype="text/csv",
+        download_name="template.csv",
+        as_attachment=True
+    )
+
+@app.route("/download-recipients")
+def download_recipients():
+    status = request.args.get("status","pending")
+    if status=="pending":
+        data = RECIPIENTS
+        filename="pending.csv"
+    else:
+        data = SENT_RECIPIENTS
+        filename="sent.csv"
+    output = StringIO()
+    writer = csv.DictWriter(output, fieldnames=["email","name","real_name"])
+    writer.writeheader()
+    for r in data:
+        writer.writerow(r)
+    output.seek(0)
+    return send_file(
+        StringIO(output.getvalue()),
+        mimetype="text/csv",
+        download_name=filename,
+        as_attachment=True
+    )
+
+# ================== 启动 ==================
 if __name__ == "__main__":
     load_recipients()
     port = int(os.environ.get("PORT",10000))
