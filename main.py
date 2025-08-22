@@ -7,7 +7,7 @@ import json
 from flask import Flask, request, jsonify, render_template_string, send_file, Response
 from email.mime.text import MIMEText
 from email.header import Header
-from io import StringIO
+from io import StringIO, BytesIO
 from threading import Thread, Lock
 from queue import Queue
 
@@ -114,157 +114,150 @@ def send_event(data):
 @app.route("/", methods=["GET"])
 def home():
     template = """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <title>MailBot 后台</title>
-        <style>
-            body { font-family: Arial; margin:0; padding:0; display:flex; height:100vh; background:#f5f5f5;}
-            .sidebar { width:200px; background:#2f4050; color:#fff; display:flex; flex-direction:column; }
-            .sidebar button { padding:15px; background:none; border:none; color:#fff; cursor:pointer; text-align:left; font-size:16px; border-bottom:1px solid #3c4b5a;}
-            .sidebar button:hover { background:#1ab394;}
-            .main { flex:1; padding:20px; overflow:auto;}
-            .card { background:#fff; padding:15px; margin-bottom:15px; box-shadow:0 2px 5px rgba(0,0,0,0.1);}
-            table { width:100%; border-collapse: collapse;}
-            th, td { border:1px solid #ddd; padding:8px; text-align:left;}
-            th { background:#f2f2f2;}
-            .btn { padding:6px 12px; background:#1ab394; color:#fff; border:none; cursor:pointer;}
-            .btn:hover { background:#18a689;}
-        </style>
-    </head>
-    <body>
-        <div class="sidebar">
-            <button onclick="showPage('recipients')">收件箱管理</button>
-            <button onclick="showPage('send')">邮件发送</button>
-        </div>
-        <div class="main">
-            <div id="recipientsPage">
-                <h2>收件箱管理</h2>
-                <input type="file" id="csvFile">
-                <button class="btn" onclick="uploadCSV()">上传 CSV</button>
-                <button class="btn" onclick="clearRecipients()">一键清空列表</button>
-                <button class="btn" onclick="downloadTemplate()">下载 CSV 模板</button>
-                <button class="btn" onclick="exportPending()">导出未发送收件人</button>
-                <button class="btn" onclick="exportSent()">导出已发送收件人</button>
-                <button class="btn" onclick="continueTask()">继续上次任务</button>
-                <div class="card" style="margin-top:10px;">
-                    <h3>收件箱列表</h3>
-                    <table id="recipientsTable">
-                        <thead><tr><th>Email</th><th>Name</th><th>Real Name</th><th>操作</th></tr></thead>
-                        <tbody></tbody>
-                    </table>
-                </div>
-            </div>
-            <div id="sendPage" style="display:none;">
-                <h2>邮件发送</h2>
-                <div class="card">
-                    <label>主题:</label><br>
-                    <input type="text" id="subject" style="width:100%" placeholder="请输入主题, 可用 {name} {real_name}">
-                    <br><br>
-                    <label>正文:</label><br>
-                    <textarea id="body" style="width:100%;height:150px;" placeholder="请输入正文, 可用 {name} {real_name}"></textarea>
-                    <br><br>
-                    <label>发送间隔(秒):</label>
-                    <input type="number" id="interval" value="5" style="width:60px;">
-                    <button class="btn" onclick="startSend()">开始发送</button>
-                    <button class="btn" onclick="pauseSend()">暂停</button>
-                    <button class="btn" onclick="resumeSend()">继续</button>
-                    <button class="btn" onclick="stopSend()">停止</button>
-                </div>
-                <div class="card" style="margin-top:10px;">
-                    <h3>实时发送进度</h3>
-                    <ul id="sendLog"></ul>
-                    <h3>账号发送统计</h3>
-                    <ul id="accountUsage"></ul>
-                </div>
-            </div>
-        </div>
-        <script>
-            function showPage(page){
-                document.getElementById('recipientsPage').style.display = page==='recipients'?'block':'none';
-                document.getElementById('sendPage').style.display = page==='send'?'block':'none';
-                if(page==='recipients'){ loadRecipients(); }
-            }
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MailBot 后台</title>
+<style>
+body { font-family: Arial; margin:0; padding:0; display:flex; height:100vh; background:#f5f5f5;}
+.sidebar { width:200px; background:#2f4050; color:#fff; display:flex; flex-direction:column; }
+.sidebar button { padding:15px; background:none; border:none; color:#fff; cursor:pointer; text-align:left; font-size:16px; border-bottom:1px solid #3c4b5a;}
+.sidebar button:hover { background:#1ab394;}
+.main { flex:1; padding:20px; overflow:auto;}
+.card { background:#fff; padding:15px; margin-bottom:15px; box-shadow:0 2px 5px rgba(0,0,0,0.1);}
+table { width:100%; border-collapse: collapse;}
+th, td { border:1px solid #ddd; padding:8px; text-align:left;}
+th { background:#f2f2f2;}
+.btn { padding:6px 12px; background:#1ab394; color:#fff; border:none; cursor:pointer;}
+.btn:hover { background:#18a689;}
+</style>
+</head>
+<body>
+<div class="sidebar">
+<button onclick="showPage('recipients')">收件箱管理</button>
+<button onclick="showPage('send')">邮件发送</button>
+</div>
+<div class="main">
+<div id="recipientsPage">
+<h2>收件箱管理</h2>
+<input type="file" id="csvFile">
+<button class="btn" onclick="uploadCSV()">上传 CSV</button>
+<button class="btn" onclick="clearRecipients()">一键清空列表</button>
+<button class="btn" onclick="downloadTemplate()">下载 CSV 模板</button>
+<button class="btn" onclick="exportPending()">导出未发送收件人</button>
+<button class="btn" onclick="exportSent()">导出已发送收件人</button>
+<button class="btn" onclick="continueTask()">继续上次任务</button>
+<div class="card" style="margin-top:10px;">
+<h3>收件箱列表</h3>
+<table id="recipientsTable">
+<thead><tr><th>Email</th><th>Name</th><th>Real Name</th><th>操作</th></tr></thead>
+<tbody></tbody>
+</table>
+</div>
+</div>
+<div id="sendPage" style="display:none;">
+<h2>邮件发送</h2>
+<div class="card">
+<label>主题:</label><br>
+<input type="text" id="subject" style="width:100%" placeholder="请输入主题, 可用 {name} {real_name}">
+<br><br>
+<label>正文:</label><br>
+<textarea id="body" style="width:100%;height:150px;" placeholder="请输入正文, 可用 {name} {real_name}"></textarea>
+<br><br>
+<label>发送间隔(秒):</label>
+<input type="number" id="interval" value="5" style="width:60px;">
+<button class="btn" onclick="startSend()">开始发送</button>
+<button class="btn" onclick="pauseSend()">暂停</button>
+<button class="btn" onclick="resumeSend()">继续</button>
+<button class="btn" onclick="stopSend()">停止</button>
+</div>
+<div class="card" style="margin-top:10px;">
+<h3>实时发送进度</h3>
+<ul id="sendLog"></ul>
+<h3>账号发送统计</h3>
+<ul id="accountUsage"></ul>
+</div>
+</div>
+</div>
+<script>
+function showPage(page){
+document.getElementById('recipientsPage').style.display = page==='recipients'?'block':'none';
+document.getElementById('sendPage').style.display = page==='send'?'block':'none';
+if(page==='recipients'){ loadRecipients(); }
+}
+function uploadCSV(){
+const file = document.getElementById('csvFile').files[0];
+if(!file){ alert("请选择文件"); return; }
+const formData = new FormData();
+formData.append('file', file);
+fetch('/upload-csv', {method:'POST', body:formData})
+.then(res=>res.json())
+.then(data=>{
+alert(data.message);
+loadRecipients();
+});
+}
+function loadRecipients(){
+fetch('/recipients').then(res=>res.json()).then(data=>{
+const tbody = document.querySelector('#recipientsTable tbody');
+tbody.innerHTML = '';
+data.pending.forEach((r,i)=>{
+const tr = document.createElement('tr');
+tr.innerHTML = `<td>${r.email}</td><td>${r.name||''}</td><td>${r.real_name||''}</td>
+<td><button onclick="deleteRecipient('${r.email}')">删除</button></td>`;
+tbody.appendChild(tr);
+});
+});
+}
+function deleteRecipient(email){
+fetch('/delete-recipient', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email})})
+.then(res=>res.json()).then(data=>{ alert(data.message); loadRecipients(); });
+}
+function clearRecipients(){
+fetch('/clear-recipients', {method:'POST'}).then(res=>res.json()).then(data=>{ alert(data.message); loadRecipients(); });
+}
+function downloadTemplate(){ window.location.href="/download-template"; }
+function exportPending(){ window.location.href="/download-recipients?status=pending"; }
+function exportSent(){ window.location.href="/download-recipients?status=sent"; }
+function continueTask(){ window.location.href="/continue-task"; }
 
-            function uploadCSV(){
-                const file = document.getElementById('csvFile').files[0];
-                if(!file){ alert("请选择文件"); return; }
-                const formData = new FormData();
-                formData.append('file', file);
-                fetch('/upload-csv', {method:'POST', body:formData})
-                .then(res=>res.json())
-                .then(data=>{
-                    alert(data.message);
-                    loadRecipients();
-                });
-            }
-
-            function loadRecipients(){
-                fetch('/recipients').then(res=>res.json()).then(data=>{
-                    const tbody = document.querySelector('#recipientsTable tbody');
-                    tbody.innerHTML = '';
-                    data.pending.forEach((r,i)=>{
-                        const tr = document.createElement('tr');
-                        tr.innerHTML = `<td>${r.email}</td><td>${r.name||''}</td><td>${r.real_name||''}</td>
-                        <td><button onclick="deleteRecipient('${r.email}')">删除</button></td>`;
-                        tbody.appendChild(tr);
-                    });
-                });
-            }
-
-            function deleteRecipient(email){
-                fetch('/delete-recipient', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email})})
-                .then(res=>res.json()).then(data=>{ alert(data.message); loadRecipients(); });
-            }
-
-            function clearRecipients(){
-                fetch('/clear-recipients', {method:'POST'}).then(res=>res.json()).then(data=>{ alert(data.message); loadRecipients(); });
-            }
-
-            function downloadTemplate(){ window.location.href="/download-template"; }
-            function exportPending(){ window.location.href="/download-recipients?status=pending"; }
-            function exportSent(){ window.location.href="/download-recipients?status=sent"; }
-            function continueTask(){ window.location.href="/continue-task"; }
-
-            let evtSource;
-            function startSend(){
-                const subject = document.getElementById('subject').value;
-                const body = document.getElementById('body').value;
-                const interval = parseInt(document.getElementById('interval').value);
-                if(!subject || !body){ alert("请填写主题和正文"); return; }
-                fetch('/send', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({subject,body,interval})})
-                .then(res=>res.json()).then(data=>{ alert(data.message); });
-                startEventSource();
-            }
-
-            function startEventSource(){
-                evtSource = new EventSource('/send-stream');
-                const log = document.getElementById('sendLog');
-                const usage = document.getElementById('accountUsage');
-                log.innerHTML=''; usage.innerHTML='';
-                evtSource.onmessage = function(e){
-                    const d = JSON.parse(e.data);
-                    if(d.log) log.innerHTML += `<li>${d.log}</li>`;
-                    if(d.usage){
-                        usage.innerHTML='';
-                        for(const acc in d.usage){
-                            usage.innerHTML += `<li>${acc}: ${d.usage[acc]}</li>`;
-                        }
-                    }
-                }
-            }
-
-            function pauseSend(){ fetch('/pause-send', {method:'POST'}); }
-            function resumeSend(){ fetch('/resume-send', {method:'POST'}); }
-            function stopSend(){ fetch('/stop-send', {method:'POST'}); }
-        </script>
-    </body>
-    </html>
-    """
+let evtSource;
+function startSend(){
+const subject = document.getElementById('subject').value;
+const body = document.getElementById('body').value;
+const interval = parseInt(document.getElementById('interval').value);
+if(!subject || !body){ alert("请填写主题和正文"); return; }
+fetch('/send', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({subject,body,interval})})
+.then(res=>res.json()).then(data=>{ alert(data.message); });
+startEventSource();
+}
+function startEventSource(){
+evtSource = new EventSource('/send-stream');
+const log = document.getElementById('sendLog');
+const usage = document.getElementById('accountUsage');
+log.innerHTML=''; usage.innerHTML='';
+evtSource.onmessage = function(e){
+const d = JSON.parse(e.data);
+if(d.log) log.innerHTML += `<li>${d.log}</li>`;
+if(d.usage){
+usage.innerHTML='';
+for(const acc in d.usage){
+usage.innerHTML += `<li>${acc}: ${d.usage[acc]}</li>`;
+}
+}
+}
+}
+function pauseSend(){ fetch('/pause-send', {method:'POST'}); }
+function resumeSend(){ fetch('/resume-send', {method:'POST'}); }
+function stopSend(){ fetch('/stop-send', {method:'POST'}); }
+</script>
+</body>
+</html>
+"""
     return render_template_string(template)
 
-# ================== 以下接口同之前补全版本 ==================
+# ================== 邮件发送接口 ==================
 @app.route("/send", methods=["POST"])
 def start_send():
     global IS_SENDING, PAUSED
@@ -347,7 +340,6 @@ def send_stream():
             EVENT_SUBSCRIBERS.remove(q)
     return Response(event_stream(), mimetype="text/event-stream")
 
-# 继续上次任务
 @app.route("/continue-task")
 def continue_task():
     global SEND_QUEUE, IS_SENDING, PAUSED
@@ -357,7 +349,7 @@ def continue_task():
         PAUSED = False
     return jsonify({"message":"已加载上次未完成任务，可开始发送"})
 
-# 收件人接口
+# ================== 收件人接口 ==================
 @app.route("/recipients", methods=["GET"])
 def get_recipients():
     return jsonify({"pending": RECIPIENTS, "sent": SENT_RECIPIENTS})
@@ -401,7 +393,7 @@ def download_template():
     writer.writeheader()
     output.seek(0)
     return send_file(
-        StringIO(output.getvalue()),
+        BytesIO(output.getvalue().encode("utf-8")),
         mimetype="text/csv",
         download_name="template.csv",
         as_attachment=True
@@ -423,7 +415,7 @@ def download_recipients():
         writer.writerow(r)
     output.seek(0)
     return send_file(
-        StringIO(output.getvalue()),
+        BytesIO(output.getvalue().encode("utf-8")),
         mimetype="text/csv",
         download_name=filename,
         as_attachment=True
