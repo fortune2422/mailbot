@@ -45,10 +45,10 @@ SENT_RECIPIENTS = []
 
 # ================== 发送控制 ==================
 SEND_QUEUE = []
+IS_SENDING = False
 PAUSED = False
 SEND_LOCK = Lock()
 EVENT_SUBSCRIBERS = []
-WORKER_STARTED = False  # 控制 worker 只启动一次
 
 # ================== 辅助函数 ==================
 def reset_daily_usage():
@@ -264,9 +264,10 @@ def home():
     """
     return render_template_string(template)
 
-# ================== 发送相关接口 ==================
+# ================== 邮件发送 ==================
 @app.route("/send", methods=["POST"])
 def start_send():
+    global IS_SENDING, PAUSED
     data = request.json
     subject = data.get("subject")
     body = data.get("body")
@@ -274,44 +275,56 @@ def start_send():
     if not subject or not body:
         return jsonify({"message":"主题和正文不能为空"}), 400
     SEND_QUEUE.append({"subject":subject,"body":body,"interval":interval})
-    start_worker()
-    return jsonify({"message":"邮件发送任务已加入队列"})
+    if not IS_SENDING:
+        IS_SENDING = True
+        PAUSED = False
+        t = Thread(target=send_worker_loop, daemon=True)
+        t.start()
+    return jsonify({"message":"邮件发送任务已启动"})
 
 def send_worker_loop():
-    global PAUSED
-    while True:
+    global IS_SENDING, PAUSED
+    while SEND_QUEUE:
         reset_daily_usage()
-        if PAUSED or not SEND_QUEUE:
-            time.sleep(1)
-            continue
-        task = None
-        with SEND_LOCK:
-            if SEND_QUEUE:
-                task = SEND_QUEUE.pop(0)
-        if not task:
-            continue
+        task = SEND_QUEUE[0]
         subject = task["subject"]
         body = task["body"]
-        interval = task.get("interval", 5)
+        interval = task["interval"]
+
+        if PAUSED:
+            time.sleep(1)
+            continue
 
         recipient = None
         with SEND_LOCK:
             if RECIPIENTS:
                 recipient = RECIPIENTS.pop(0)
+
         if not recipient:
-            time.sleep(1)
-            continue
+            break
 
         acc = get_next_account()
         if not acc:
             log_message("所有账号今日已达上限")
-            with SEND_LOCK:
-                RECIPIENTS.insert(0, recipient)  # 放回去
             time.sleep(60)
+            with SEND_LOCK:
+                RECIPIENTS.insert(0, recipient)
             continue
 
-        personalized_subject = subject.format(**recipient)
-        personalized_body = body.format(**recipient)
+        # 安全生成邮件内容
+        recipient_safe = {
+            "name": recipient.get("name",""),
+            "real_name": recipient.get("real_name","")
+        }
+        try:
+            personalized_subject = subject.format(**recipient_safe)
+            personalized_body = body.format(**recipient_safe)
+        except Exception as e:
+            log_message(f"内容格式错误 {recipient['email']}: {e}")
+            with SEND_LOCK:
+                RECIPIENTS.append(recipient)
+            continue
+
         success, err = send_email(acc, recipient["email"], personalized_subject, personalized_body)
         if success:
             SENT_RECIPIENTS.append(recipient)
@@ -322,13 +335,10 @@ def send_worker_loop():
                 RECIPIENTS.append(recipient)
         save_recipients()
         time.sleep(interval)
-
-def start_worker():
-    global WORKER_STARTED
-    if not WORKER_STARTED:
-        WORKER_STARTED = True
-        t = Thread(target=send_worker_loop, daemon=True)
-        t.start()
+    IS_SENDING = False
+    with SEND_LOCK:
+        if SEND_QUEUE:
+            SEND_QUEUE.pop(0)
 
 @app.route("/pause-send", methods=["POST"])
 def pause_send():
@@ -344,8 +354,9 @@ def resume_send():
 
 @app.route("/stop-send", methods=["POST"])
 def stop_send():
-    global PAUSED, SEND_QUEUE
-    PAUSED = True
+    global IS_SENDING, PAUSED, SEND_QUEUE
+    IS_SENDING = False
+    PAUSED = False
     SEND_QUEUE.clear()
     return jsonify({"message":"发送已停止"})
 
@@ -362,14 +373,19 @@ def send_stream():
             EVENT_SUBSCRIBERS.remove(q)
     return Response(event_stream(), mimetype="text/event-stream")
 
+# ================== 收件人管理 ==================
 @app.route("/continue-task")
 def continue_task():
+    global SEND_QUEUE, IS_SENDING, PAUSED
     if RECIPIENTS:
         SEND_QUEUE.append({"subject":"继续上次任务","body":"继续上次任务邮件","interval":5})
-    start_worker()
+        if not IS_SENDING:
+            IS_SENDING = True
+            PAUSED = False
+            t = Thread(target=send_worker_loop, daemon=True)
+            t.start()
     return jsonify({"message":"已加载上次未完成任务，可开始发送"})
 
-# ================== 收件人接口 ==================
 @app.route("/recipients", methods=["GET"])
 def get_recipients():
     return jsonify({"pending": RECIPIENTS, "sent": SENT_RECIPIENTS})
@@ -384,8 +400,8 @@ def upload_csv():
     for row in reader:
         RECIPIENTS.append({
             "email": row.get("email"),
-            "name": row.get("name"),
-            "real_name": row.get("real_name")
+            "name": row.get("name",""),
+            "real_name": row.get("real_name","")
         })
     save_recipients()
     return jsonify({"message":"CSV 上传成功"})
@@ -444,6 +460,5 @@ def download_recipients():
 # ================== 启动 ==================
 if __name__ == "__main__":
     load_recipients()
-    start_worker()  # 启动后台 worker
     port = int(os.environ.get("PORT",10000))
     app.run(host="0.0.0.0", port=port, threaded=True)
