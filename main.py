@@ -28,7 +28,7 @@ def load_accounts():
         email = os.getenv(f"EMAIL{i}")
         app_password = os.getenv(f"APP_PASSWORD{i}")
         if email and app_password:
-            accounts.append({"email": email, "app_password": app_password})
+            accounts.append({"email": email, "app_password": app_password, "selected": True})
             i += 1
         else:
             break
@@ -59,10 +59,14 @@ def reset_daily_usage():
         last_reset_date = today
 
 def get_next_account():
+    """根据已勾选的账号轮流获取下一个可用账号"""
     global current_index
-    for _ in range(len(ACCOUNTS)):
-        acc = ACCOUNTS[current_index]
-        current_index = (current_index + 1) % len(ACCOUNTS)
+    selected_accounts = [acc for acc in ACCOUNTS if acc.get("selected", True)]
+    if not selected_accounts:
+        return None
+    for _ in range(len(selected_accounts)):
+        acc = selected_accounts[current_index % len(selected_accounts)]
+        current_index = (current_index + 1) % len(selected_accounts)
         if account_usage[acc["email"]] < DAILY_LIMIT:
             return acc
     return None
@@ -159,6 +163,9 @@ def home():
             <div id="sendPage" style="display:none;">
                 <h2>邮件发送</h2>
                 <div class="card">
+                    <label>选择发送账号:</label><br>
+                    <div id="accountCheckboxes"></div>
+                    <br>
                     <label>主题:</label><br>
                     <input type="text" id="subject" style="width:100%" placeholder="请输入主题, 可用 {name} {real_name}">
                     <br><br>
@@ -170,7 +177,6 @@ def home():
                     <button class="btn" onclick="startSend()">开始发送</button>
                     <button class="btn" onclick="pauseSend()">暂停</button>
                     <button class="btn" onclick="resumeSend()">继续</button>
-                    <button class="btn" onclick="stopSend()">停止</button>
                 </div>
                 <div class="card" style="margin-top:10px;">
                     <h3>实时发送进度</h3>
@@ -185,6 +191,22 @@ def home():
                 document.getElementById('recipientsPage').style.display = page==='recipients'?'block':'none';
                 document.getElementById('sendPage').style.display = page==='send'?'block':'none';
                 if(page==='recipients'){ loadRecipients(); }
+                if(page==='send'){ loadAccounts(); }
+            }
+
+            function loadAccounts(){
+                fetch('/accounts').then(res=>res.json()).then(data=>{
+                    const div = document.getElementById('accountCheckboxes');
+                    div.innerHTML = '';
+                    data.forEach(acc=>{
+                        const id = acc.email.replace(/[@.]/g,'_');
+                        div.innerHTML += `<label><input type="checkbox" id="${id}" ${acc.selected?'checked':''} onchange="toggleAccount('${acc.email}', this.checked)"> ${acc.email}</label><br>`;
+                    });
+                });
+            }
+
+            function toggleAccount(email, checked){
+                fetch('/toggle-account', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email,checked})});
             }
 
             function uploadCSV(){
@@ -255,9 +277,12 @@ def home():
                 }
             }
 
-            function pauseSend(){ fetch('/pause-send', {method:'POST'}); }
-            function resumeSend(){ fetch('/resume-send', {method:'POST'}); }
-            function stopSend(){ fetch('/stop-send', {method:'POST'}); }
+            function pauseSend(){
+                fetch('/pause-send', {method:'POST'}).then(res=>res.json()).then(data=>alert(data.message));
+            }
+            function resumeSend(){
+                fetch('/resume-send', {method:'POST'}).then(res=>res.json()).then(data=>alert(data.message));
+            }
         </script>
     </body>
     </html>
@@ -305,13 +330,12 @@ def send_worker_loop():
 
         acc = get_next_account()
         if not acc:
-            log_message("所有账号今日已达上限")
+            log_message("没有可用账号或账号今日已达上限")
             time.sleep(60)
             with SEND_LOCK:
                 RECIPIENTS.insert(0, recipient)
             continue
 
-        # 安全生成邮件内容
         recipient_safe = {
             "name": recipient.get("name",""),
             "real_name": recipient.get("real_name","")
@@ -328,7 +352,7 @@ def send_worker_loop():
         success, err = send_email(acc, recipient["email"], personalized_subject, personalized_body)
         if success:
             SENT_RECIPIENTS.append(recipient)
-            log_message(f"已发送给 {recipient['email']}")
+            log_message(f"已发送给 {recipient['email']} (使用账号 {acc['email']})")
         else:
             log_message(f"发送失败 {recipient['email']} : {err}")
             with SEND_LOCK:
@@ -351,14 +375,6 @@ def resume_send():
     global PAUSED
     PAUSED = False
     return jsonify({"message":"发送已继续"})
-
-@app.route("/stop-send", methods=["POST"])
-def stop_send():
-    global IS_SENDING, PAUSED, SEND_QUEUE
-    IS_SENDING = False
-    PAUSED = False
-    SEND_QUEUE.clear()
-    return jsonify({"message":"发送已停止"})
 
 @app.route("/send-stream")
 def send_stream():
@@ -456,6 +472,22 @@ def download_recipients():
         download_name=filename,
         as_attachment=True
     )
+
+# ================== 账号管理 ==================
+@app.route("/accounts")
+def get_accounts():
+    return jsonify(ACCOUNTS)
+
+@app.route("/toggle-account", methods=["POST"])
+def toggle_account():
+    data = request.json
+    email = data.get("email")
+    checked = data.get("checked")
+    for acc in ACCOUNTS:
+        if acc["email"] == email:
+            acc["selected"] = checked
+            break
+    return jsonify({"message":"账号状态已更新"})
 
 # ================== 启动 ==================
 if __name__ == "__main__":
