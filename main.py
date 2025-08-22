@@ -14,8 +14,6 @@ from queue import Queue
 app = Flask(__name__)
 
 # ================== 配置 ==================
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 587
 DAILY_LIMIT = 450
 RECIPIENTS_FILE = "recipients.json"
 LOG_FILE = "send_log.txt"
@@ -27,8 +25,16 @@ def load_accounts():
     while True:
         email = os.getenv(f"EMAIL{i}")
         app_password = os.getenv(f"APP_PASSWORD{i}")
+        smtp_server = os.getenv(f"SMTP_SERVER{i}", "smtp.gmail.com")
+        smtp_port = int(os.getenv(f"SMTP_PORT{i}", 587))
         if email and app_password:
-            accounts.append({"email": email, "app_password": app_password, "selected": True})
+            accounts.append({
+                "email": email,
+                "app_password": app_password,
+                "smtp_server": smtp_server,
+                "smtp_port": smtp_port,
+                "selected": True
+            })
             i += 1
         else:
             break
@@ -77,7 +83,7 @@ def send_email(account, to_email, subject, body):
         msg["To"] = to_email
         msg["Subject"] = Header(subject, "utf-8")
 
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server = smtplib.SMTP(account["smtp_server"], account["smtp_port"])
         server.starttls()
         server.login(account["email"], account["app_password"])
         server.sendmail(account["email"], [to_email], msg.as_string())
@@ -132,8 +138,9 @@ def home():
             table { width:100%; border-collapse: collapse;}
             th, td { border:1px solid #ddd; padding:8px; text-align:left;}
             th { background:#f2f2f2;}
-            .btn { padding:6px 12px; background:#1ab394; color:#fff; border:none; cursor:pointer;}
+            .btn { padding:6px 12px; background:#1ab394; color:#fff; border:none; cursor:pointer; border-radius:4px; margin:2px;}
             .btn:hover { background:#18a689;}
+            .account-item { display:flex; justify-content:space-between; padding:5px 0; border-bottom:1px solid #ddd; align-items:center;}
         </style>
     </head>
     <body>
@@ -231,7 +238,7 @@ def home():
                     data.pending.forEach((r)=>{
                         const tr = document.createElement('tr');
                         tr.innerHTML = `<td>${r.email}</td><td>${r.name||''}</td><td>${r.real_name||''}</td>
-                        <td><button onclick="deleteRecipient('${r.email}')">删除</button></td>`;
+                        <td><button class="btn" onclick="deleteRecipient('${r.email}')">删除</button></td>`;
                         tbody.appendChild(tr);
                     });
                 });
@@ -321,7 +328,10 @@ def home():
                     div.innerHTML = '';
                     data.forEach(acc=>{
                         const id = 'list_'+acc.email.replace(/[@.]/g,'_');
-                        div.innerHTML += `<div id="${id}">${acc.email} <button onclick="deleteAccount('${acc.email}')">删除</button></div>`;
+                        div.innerHTML += `<div class="account-item" id="${id}">
+                            <span>${acc.email}</span>
+                            <button class="btn" onclick="deleteAccount('${acc.email}')">删除</button>
+                        </div>`;
                     });
                 });
             }
@@ -552,6 +562,8 @@ def upload_accounts():
         ACCOUNTS.append({
             "email": row.get("email"),
             "app_password": row.get("app_password"),
+            "smtp_server": row.get("smtp_server","smtp.gmail.com"),
+            "smtp_port": int(row.get("smtp_port",587)),
             "selected": True
         })
         account_usage[row.get("email")] = 0
