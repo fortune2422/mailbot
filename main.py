@@ -4,43 +4,37 @@ import smtplib
 import time
 import datetime
 import json
+import requests
 from flask import Flask, request, jsonify, render_template_string, send_file, Response
 from email.mime.text import MIMEText
 from email.header import Header
 from io import StringIO, BytesIO
 from threading import Thread, Lock
 from queue import Queue
+import atexit
+
 
 app = Flask(__name__)
 
 # ================== 配置 ==================
 DAILY_LIMIT = 450
 RECIPIENTS_FILE = "recipients.json"
-LOG_FILE_JSON = "send_log.json"         # 新增：持久化日志（数组）
-USAGE_FILE_JSON = "account_usage.json"  # 新增：账号用量持久化
+LOG_FILE_JSON = "send_log.json"
+USAGE_FILE_JSON = "account_usage.json"
 
-# ================== 账号加载与持久化 ==================
+# ================== 账号加载 ==================
 def load_accounts_from_env():
     accounts = []
     i = 1
     while True:
         email = os.getenv(f"EMAIL{i}")
         app_password = os.getenv(f"APP_PASSWORD{i}")
-        smtp_server = os.getenv(f"SMTP_SERVER{i}")  # 可选覆盖
-        smtp_port = os.getenv(f"SMTP_PORT{i}")      # 可选覆盖
+        smtp_server = os.getenv(f"SMTP_SERVER{i}")
+        smtp_port = os.getenv(f"SMTP_PORT{i}")
         if email and app_password:
-            rec = {
-                "email": email,
-                "app_password": app_password,
-                "selected": True
-            }
-            if smtp_server:
-                rec["smtp_server"] = smtp_server
-            if smtp_port:
-                try:
-                    rec["smtp_port"] = int(smtp_port)
-                except:
-                    pass
+            rec = {"email": email, "app_password": app_password, "selected": True}
+            if smtp_server: rec["smtp_server"] = smtp_server
+            if smtp_port: rec["smtp_port"] = int(smtp_port)
             accounts.append(rec)
             i += 1
         else:
@@ -50,27 +44,25 @@ def load_accounts_from_env():
 ACCOUNTS = load_accounts_from_env()
 current_index = 0
 
-def load_usage():
-    if os.path.exists(USAGE_FILE_JSON):
-        try:
-            with open(USAGE_FILE_JSON, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
-
-def save_usage():
-    with open(USAGE_FILE_JSON, "w", encoding="utf-8") as f:
-        json.dump(account_usage, f, ensure_ascii=False, indent=2)
-
-account_usage = load_usage()
-# 确保为每个账号建立计数
-for acc in ACCOUNTS:
-    account_usage.setdefault(acc["email"], 0)
-
+# ================== 用量持久化 ==================
+account_usage = {}
 last_reset_date = datetime.date.today()
 
-# ================== 收件人列表 ==================
+if os.path.exists(USAGE_FILE_JSON):
+    try:
+        with open(USAGE_FILE_JSON,'r',encoding='utf-8') as f:
+            account_usage = json.load(f)
+    except:
+        account_usage = {}
+
+for acc in ACCOUNTS:
+    account_usage.setdefault(acc['email'], 0)
+
+def save_usage():
+    with open(USAGE_FILE_JSON,'w',encoding='utf-8') as f:
+        json.dump(account_usage,f,ensure_ascii=False,indent=2)
+
+# ================== 收件人 ==================
 RECIPIENTS = []
 SENT_RECIPIENTS = []
 
@@ -81,118 +73,152 @@ PAUSED = False
 SEND_LOCK = Lock()
 EVENT_SUBSCRIBERS = []
 
-# ================== 日志持久化 ==================
+# ================== 日志 ==================
+SEND_LOGS = []
+
 def load_logs():
+    global SEND_LOGS
     if os.path.exists(LOG_FILE_JSON):
         try:
-            with open(LOG_FILE_JSON, "r", encoding="utf-8") as f:
-                return json.load(f)
+            with open(LOG_FILE_JSON,'r',encoding='utf-8') as f:
+                SEND_LOGS = json.load(f)
         except:
-            return []
-    return []
+            SEND_LOGS = []
+    else:
+        SEND_LOGS = []
 
-def save_logs(logs):
-    with open(LOG_FILE_JSON, "w", encoding="utf-8") as f:
-        json.dump(logs, f, ensure_ascii=False, indent=2)
-
-SEND_LOGS = load_logs()  # 列表元素形如：{"ts": "...", "msg": "已发送给 xxx"}
-
-def append_log(msg):
-    entry = {"ts": datetime.datetime.utcnow().isoformat() + "Z", "msg": msg}
-    SEND_LOGS.append(entry)
-    # 也写一份到 usage 一起，保证持久化
-    save_logs(SEND_LOGS)
+def save_logs():
+    with open(LOG_FILE_JSON,'w',encoding='utf-8') as f:
+        json.dump(SEND_LOGS,f,ensure_ascii=False,indent=2)
+        
+def cleanup():
+    save_recipients()
+    save_logs()
     save_usage()
-    # 推到 SSE
-    send_event({"log": msg, "usage": account_usage.copy()})
 
-# ================== 辅助函数 ==================
+atexit.register(cleanup)
+
+# ================== 辅助 ==================
 def reset_daily_usage_if_needed():
-    global account_usage, last_reset_date
+    global account_usage,last_reset_date
     today = datetime.date.today()
     if today != last_reset_date:
-        # 新的一天，清零
-        for k in list(account_usage.keys()):
+        for k in account_usage.keys():
             account_usage[k] = 0
         last_reset_date = today
         save_usage()
         append_log("已进入新的一天，账号发送计数已重置。")
 
 def infer_smtp(email):
-    """
-    根据邮箱域名自动推断 SMTP；也支持在 ACCOUNTS 中由每个账号条目覆盖 smtp_server/smtp_port。
-    """
-    domain = email.split("@")[-1].lower().strip()
-    # Office/Hotmail/Outlook 系列
-    outlook_domains = {"outlook.com", "hotmail.com", "live.com", "msn.com", "outlook.cn"}
-    if domain in outlook_domains:
-        return ("smtp.office365.com", 587)
-    # Gmail
-    if domain == "gmail.com":
-        return ("smtp.gmail.com", 587)
-    # 其他未知域，默认走 587，你也可以改成自家企业邮箱
-    return ("smtp." + domain, 587)
+    domain = email.split('@')[-1].lower().strip()
+    if domain in {"outlook.com","hotmail.com","live.com","msn.com","outlook.cn"}: return ("smtp.office365.com",587)
+    if domain=="gmail.com": return ("smtp.gmail.com",587)
+    return ("smtp."+domain,587)
 
 def get_next_account():
-    """根据已勾选的账号轮流获取下一个可用账号"""
     global current_index
-    selected_accounts = [acc for acc in ACCOUNTS if acc.get("selected", True)]
-    if not selected_accounts:
-        return None
+    selected_accounts = [acc for acc in ACCOUNTS if acc.get("selected",True)]
+    if not selected_accounts: return None
     for _ in range(len(selected_accounts)):
         acc = selected_accounts[current_index % len(selected_accounts)]
-        current_index = (current_index + 1) % len(selected_accounts)
-        count = account_usage.get(acc["email"], 0)
-        if count < DAILY_LIMIT:
-            return acc
+        current_index = (current_index+1) % len(selected_accounts)
+        count = account_usage.get(acc['email'],0)
+        if count < DAILY_LIMIT: return acc
     return None
 
-def send_email(account, to_email, subject, body):
+def send_email(account,to_email,subject,body):
     try:
-        # SMTP 选择：优先用账号条目自带覆盖；否则根据域名推断
-        smtp_server, smtp_port = infer_smtp(account["email"])
-        if "smtp_server" in account:
-            smtp_server = account["smtp_server"]
-        if "smtp_port" in account:
-            smtp_port = int(account["smtp_port"])
-
-        msg = MIMEText(body, "plain", "utf-8")
-        msg["From"] = account["email"]
-        msg["To"] = to_email
-        msg["Subject"] = Header(subject, "utf-8")
-
-        server = smtplib.SMTP(smtp_server, smtp_port)
+        smtp_server,smtp_port = infer_smtp(account['email'])
+        if 'smtp_server' in account: smtp_server = account['smtp_server']
+        if 'smtp_port' in account: smtp_port = int(account['smtp_port'])
+        msg = MIMEText(body,'plain','utf-8')
+        msg['From'] = account['email']
+        msg['To'] = to_email
+        msg['Subject'] = Header(subject,'utf-8')
+        server = smtplib.SMTP(smtp_server,smtp_port)
         server.starttls()
-        server.login(account["email"], account["app_password"])
-        server.sendmail(account["email"], [to_email], msg.as_string())
+        server.login(account['email'],account['app_password'])
+        server.sendmail(account['email'],[to_email],msg.as_string())
         server.quit()
-
-        account_usage[account["email"]] = account_usage.get(account["email"], 0) + 1
+        account_usage[account['email']] = account_usage.get(account['email'],0)+1
         save_usage()
-        return True, ""
+        return True,''
     except Exception as e:
-        return False, str(e)
+        return False,str(e)
 
+# ================== 收件人持久化 ==================
 def save_recipients():
-    with open(RECIPIENTS_FILE, "w", encoding="utf-8") as f:
-        json.dump({"pending": RECIPIENTS, "sent": SENT_RECIPIENTS}, f, ensure_ascii=False, indent=2)
+    with open(RECIPIENTS_FILE,'w',encoding='utf-8') as f:
+        json.dump({"pending":RECIPIENTS,"sent":SENT_RECIPIENTS},f,ensure_ascii=False,indent=2)
 
 def load_recipients():
-    global RECIPIENTS, SENT_RECIPIENTS
+    global RECIPIENTS,SENT_RECIPIENTS
     if os.path.exists(RECIPIENTS_FILE):
-        with open(RECIPIENTS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            RECIPIENTS = data.get("pending", [])
-            SENT_RECIPIENTS = data.get("sent", [])
+        with open(RECIPIENTS_FILE,'r',encoding='utf-8') as f:
+            data=json.load(f)
+            RECIPIENTS=data.get('pending',[])
+            SENT_RECIPIENTS=data.get('sent',[])
     else:
-        RECIPIENTS, SENT_RECIPIENTS = [], []
+        RECIPIENTS=[]
+        SENT_RECIPIENTS=[]
+        
+# ---- 保证启动时总是加载历史数据 ----
+load_recipients()
+load_logs()
 
+
+# ================== 后端：24小时内账号统计 ==================
+def append_log(msg):
+    global SEND_LOGS
+    now_utc = datetime.datetime.utcnow()
+    cutoff = now_utc - datetime.timedelta(hours=24)
+    
+    # 清理24小时以上日志
+    valid_logs = []
+    for entry in SEND_LOGS:
+        try:
+            ts = datetime.datetime.fromisoformat(entry['ts'])
+            if ts > cutoff:
+                valid_logs.append(entry)
+        except Exception:
+            continue
+    SEND_LOGS = valid_logs
+
+    entry = {"ts":(now_utc+datetime.timedelta(hours=8)).isoformat()+"+08:00", "msg":msg}
+    SEND_LOGS.append(entry)
+    save_logs()
+    save_usage()
+
+    # 统计24小时内账号发送次数
+    recent_usage = {}
+    for log in SEND_LOGS:
+        text = log['msg']
+        if text.startswith('已发送给'):
+            parts = text.split('使用账号')
+            if len(parts) == 2:
+                acc_email = parts[1].strip(' )')
+                recent_usage[acc_email] = recent_usage.get(acc_email, 0) + 1
+
+    send_event({"log": msg, "usage": recent_usage})
+
+# ================== SSE ==================
 def send_event(data):
     for subscriber in EVENT_SUBSCRIBERS:
+        try: subscriber.put(json.dumps(data))
+        except: pass
+
+@app.route('/send-stream')
+def send_stream():
+    def event_stream():
+        q = Queue()
+        EVENT_SUBSCRIBERS.append(q)
         try:
-            subscriber.put(json.dumps(data))
-        except:
-            pass
+            while True:
+                data = q.get()
+                yield f"data: {data}\n\n"
+        except GeneratorExit:
+            if q in EVENT_SUBSCRIBERS: EVENT_SUBSCRIBERS.remove(q)
+    return Response(event_stream(),mimetype='text/event-stream')
 
 # ================== 前端页面（完整 HTML 内嵌） ==================
 @app.route("/", methods=["GET"])
@@ -261,16 +287,32 @@ def home():
                         <button class="btn" onclick="downloadTemplate()">下载 CSV 模板</button>
                         <button class="btn" onclick="exportPending()">导出未发送收件人</button>
                         <button class="btn" onclick="exportSent()">导出已发送收件人</button>
-                        <button class="btn" onclick="continueTask()">继续上次任务</button>
                     </div>
                 </div>
                 <div class="card" style="margin-top:10px;">
-                    <h3>收件箱列表</h3>
-                    <table id="recipientsTable">
-                        <thead><tr><th>Email</th><th>Name</th><th>Real Name</th><th>操作</th></tr></thead>
-                        <tbody></tbody>
-                    </table>
-                </div>
+    <h3>收件箱列表</h3>
+
+    <!-- 分页控件 -->
+    <div style="margin-bottom:6px;">
+        每页显示：
+        <select id="perPage" onchange="loadRecipients()">
+            <option value="10">10</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+        </select>
+        当前页：
+        <button onclick="changePage(-1)">上一页</button>
+    <input type="number" id="currentPage" value="1" style="width:50px;" onchange="loadRecipients()">
+    <button onclick="changePage(1)">下一页</button>
+    <span id="pagination"></span>
+</div>
+
+    <table id="recipientsTable">
+        <thead><tr><th>Email</th><th>Name</th><th>Real Name</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+    </table>
+</div>
+
             </div>
 
             <!-- 邮件发送 -->
@@ -357,18 +399,43 @@ def home():
                 });
             }
 
-            function loadRecipients(){
-                fetch('/recipients').then(res=>res.json()).then(data=>{
-                    const tbody = document.querySelector('#recipientsTable tbody');
-                    tbody.innerHTML = '';
-                    data.pending.forEach((r)=>{
-                        const tr = document.createElement('tr');
-                        tr.innerHTML = `<td>${r.email}</td><td>${r.name||''}</td><td>${r.real_name||''}</td>
-                        <td><button class="danger-link" onclick="deleteRecipient('${r.email}')">删除</button></td>`;
-                        tbody.appendChild(tr);
-                    });
-                });
-            }
+           function loadRecipients(){
+    fetch('/recipients').then(res=>res.json()).then(data=>{
+        const tbody = document.querySelector('#recipientsTable tbody');
+        tbody.innerHTML = '';
+
+        const perPage = parseInt(document.getElementById('perPage')?.value || 10);
+        let page = parseInt(document.getElementById('currentPage')?.value || 1);
+
+        const totalPages = Math.ceil(data.pending.length / perPage);
+        if(page > totalPages) page = totalPages;
+        if(page < 1) page = 1;
+        document.getElementById('currentPage').value = page;
+
+        const startIdx = (page-1) * perPage;
+        const endIdx = startIdx + perPage;
+        const pageData = data.pending.slice(startIdx, endIdx);
+
+        pageData.forEach((r)=>{
+            const tr = document.createElement('tr');
+            tr.innerHTML = `<td>${r.email}</td><td>${r.name||''}</td><td>${r.real_name||''}</td>`+
+                           `<td><button class="danger-link" onclick="deleteRecipient('${r.email}')">删除</button></td>`;
+            tbody.appendChild(tr);
+        });
+
+        document.getElementById('pagination').textContent = `页数: ${page}/${totalPages}`;
+    });
+}
+
+// 上一页 / 下一页按钮函数
+function changePage(offset){
+    const pageInput = document.getElementById('currentPage');
+    let page = parseInt(pageInput.value || 1);
+    page += offset;
+    if(page < 1) page = 1;
+    pageInput.value = page;
+    loadRecipients();
+}
 
             function deleteRecipient(email){
                 fetch('/delete-recipient', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email})})
@@ -382,7 +449,6 @@ def home():
             function downloadTemplate(){ window.location.href="/download-template"; }
             function exportPending(){ window.location.href="/download-recipients?status=pending"; }
             function exportSent(){ window.location.href="/download-recipients?status=sent"; }
-            function continueTask(){ window.location.href="/continue-task"; }
 
             // ---------------- 邮件发送 ----------------
             function loadAccounts(){
@@ -609,19 +675,6 @@ def resume_send():
     PAUSED = False
     return jsonify({"message":"发送已继续"})
 
-@app.route("/send-stream")
-def send_stream():
-    def event_stream():
-        q = Queue()
-        EVENT_SUBSCRIBERS.append(q)
-        try:
-            while True:
-                data = q.get()
-                yield f"data: {data}\\n\\n"
-        except GeneratorExit:
-            if q in EVENT_SUBSCRIBERS:
-                EVENT_SUBSCRIBERS.remove(q)
-    return Response(event_stream(), mimetype="text/event-stream")
 
 # ======= 历史日志 / 用量：用于刷新后回放 =======
 @app.route("/get-logs")
@@ -633,18 +686,6 @@ def get_usage():
     return jsonify({"usage": account_usage})
 
 # ================== 收件人管理 ==================
-@app.route("/continue-task")
-def continue_task():
-    global SEND_QUEUE, IS_SENDING, PAUSED
-    if RECIPIENTS:
-        SEND_QUEUE.append({"subject":"继续上次任务","body":"继续上次任务邮件","interval":5})
-        if not IS_SENDING:
-            IS_SENDING = True
-            PAUSED = False
-            t = Thread(target=send_worker_loop, daemon=True)
-            t.start()
-    return jsonify({"message":"已加载上次未完成任务，可开始发送"})
-
 @app.route("/recipients", methods=["GET"])
 def get_recipients():
     return jsonify({"pending": RECIPIENTS, "sent": SENT_RECIPIENTS})
@@ -787,12 +828,30 @@ def delete_account():
     append_log(f"已删除账号 {email}")
     return jsonify({"message": f"{email} 已删除"})
 
+# ================== Keep Alive ==================
+@app.route("/ping")
+def ping():
+    return jsonify({"status": "ok", "ts": datetime.datetime.utcnow().isoformat()})
+
+def keep_alive():
+    def run():
+        while True:
+            try:
+                url = f"http://localhost:{port}/ping"   # 自己 ping 自己
+                requests.get(url, timeout=10)
+            except Exception as e:
+                print("Keep-alive failed:", e)
+            time.sleep(300)  # 5分钟
+    t = Thread(target=run, daemon=True)
+    t.start()
+
 # ================== 启动 ==================
 if __name__ == "__main__":
-    load_recipients()
-    # 再次校验 usage 中包含所有 ENV 账号
     for acc in ACCOUNTS:
         account_usage.setdefault(acc["email"], 0)
     save_usage()
     port = int(os.environ.get("PORT", 10000))
+
+    keep_alive()   # <-- 在这里启动自 ping 线程
+
     app.run(host="0.0.0.0", port=port, threaded=True)
